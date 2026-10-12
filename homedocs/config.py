@@ -8,6 +8,8 @@ DEFAULTS = {
     "archive_dir": "archive",
     "data_dir": "data",
     "trash_dir": "trash",
+    # распознавание сканов без текстового слоя (нужен установленный Tesseract)
+    "ocr": {"enabled": True, "languages": "ukr+deu+eng+rus", "tesseract_cmd": "", "dpi": 300, "max_pages": 15},
     "ai": {
         "provider": "gemini",
         "gemini": {"model": "gemini-3.5-flash", "api_key": "",

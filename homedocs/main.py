@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from . import auth, config, db, pipeline
 from .ai import make_provider
 from .extract import MIME, SUPPORTED
+from .ocr import make_ocr
 from .translit import safe_name, to_latin
 
 STATIC = Path(__file__).parent / "static"
@@ -27,8 +28,9 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';
        "frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'")
 
 
-def create_app(cfg: dict | None = None, provider=None) -> FastAPI:
+def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
     cfg = cfg or config.load()
+    ocr = ocr if ocr is not None else make_ocr(cfg)
     conn = db.connect(cfg["data_dir"])
     cleaned = pipeline.clean_inbox(conn, cfg)
     if cleaned:
@@ -196,7 +198,45 @@ def create_app(cfg: dict | None = None, provider=None) -> FastAPI:
 
     @api.get("/meta")
     def meta():
-        return {"provider": cfg["ai"]["provider"], "types": db.labels(conn, "type"), "statuses": db.labels(conn, "status")}
+        return {"provider": cfg["ai"]["provider"], "types": db.labels(conn, "type"), "statuses": db.labels(conn, "status"),
+                "ocr": ocr_status()}
+
+    # ---------- OCR ----------
+
+    OCR_QUEUE = "FROM documents WHERE trashed_at IS NULL AND text_source IS NULL"
+
+    def ocr_status():
+        return {**ocr.status(), "pending": conn.execute(f"SELECT COUNT(*) {OCR_QUEUE}").fetchone()[0]}
+
+    @api.get("/ocr/status")
+    def ocr_state():
+        return ocr_status()
+
+    @api.post("/ocr/run")
+    def ocr_run(limit: int = 3):
+        """Распознаёт несколько документов без текста за раз; интерфейс вызывает, пока очередь не опустеет."""
+        if not ocr.status()["available"]:
+            raise HTTPException(400, "OCR is not installed (Tesseract not found)")
+        done = recognized = 0
+        for (i,) in conn.execute(f"SELECT id {OCR_QUEUE} ORDER BY id LIMIT ?", (max(1, min(limit, 20)),)).fetchall():
+            try:
+                recognized += pipeline.ocr_document(conn, ocr, i) > 0
+            except (KeyError, FileNotFoundError):
+                conn.execute("UPDATE documents SET text_source='none' WHERE id=?", (i,)); conn.commit()
+            done += 1
+        return {"done": done, "recognized": recognized, **ocr_status()}
+
+    @api.post("/documents/{doc_id}/ocr")
+    def ocr_one(doc_id: int):
+        if not ocr.status()["available"]:
+            raise HTTPException(400, "OCR is not installed (Tesseract not found)")
+        try:
+            pipeline.ocr_document(conn, ocr, doc_id)
+        except KeyError:
+            raise HTTPException(404)
+        except FileNotFoundError as e:
+            raise HTTPException(410, str(e))
+        return document(doc_id)
 
     SORTS = {"added_at": "d.added_at", "doc_date": "d.doc_date", "amount": "d.amount", "title": "COALESCE(d.title, d.filename)",
              "due_date": "d.due_date", "doc_type": "d.doc_type", "doc_status": "d.doc_status", "person": "p.name",
@@ -265,7 +305,7 @@ def create_app(cfg: dict | None = None, provider=None) -> FastAPI:
         r = conn.execute(SELECT + " WHERE d.id=?", (doc_id,)).fetchone()
         if not r:
             raise HTTPException(404)
-        return row(r)
+        return {**with_folder(row(r)), "text": r["text"]}  # текст (в т.ч. распознанный) нужен только в карточке
 
     class Patch(BaseModel):
         title: str | None = None
@@ -541,7 +581,7 @@ def create_app(cfg: dict | None = None, provider=None) -> FastAPI:
 
     @api.post("/scan")
     def scan(provider=Depends(get_provider)):
-        return pipeline.scan_inbox(conn, cfg, provider)
+        return pipeline.scan_inbox(conn, cfg, provider, ocr)
 
     @api.post("/upload")
     def upload(file: UploadFile):

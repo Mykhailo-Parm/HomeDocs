@@ -94,6 +94,10 @@ def migrate(conn):
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(documents)")}
     if "doc_status" not in cols:
         conn.execute("ALTER TABLE documents ADD COLUMN doc_status TEXT")
+    if "text_source" not in cols:  # откуда текст: pdf | txt | ocr | NULL (нет текста)
+        conn.execute("ALTER TABLE documents ADD COLUMN text_source TEXT")
+        conn.execute("UPDATE documents SET text_source = CASE WHEN text <> '' THEN "
+                     "CASE WHEN lower(filename) LIKE '%.txt' THEN 'txt' ELSE 'pdf' END END")
     if "trashed_at" not in cols:  # корзина: когда удалён и куда перенесены файлы
         conn.execute("ALTER TABLE documents ADD COLUMN trashed_at TEXT")
         conn.execute("ALTER TABLE documents ADD COLUMN trash_info TEXT")

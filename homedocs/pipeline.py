@@ -33,7 +33,39 @@ def inside(path: Path, *roots) -> bool:
     return any(path.is_relative_to(Path(r).resolve()) for r in roots)
 
 
-def scan_inbox(conn, cfg, provider) -> dict:
+MIN_TEXT = 20  # меньше символов в PDF — считаем сканом без текстового слоя
+
+
+def read_text(path: Path, ocr=None) -> tuple[str, str | None]:
+    """Текст документа и откуда он: из PDF/TXT или распознан OCR."""
+    text = extract_text(path)
+    if len(text.strip()) >= MIN_TEXT:
+        return text, "txt" if path.suffix.lower() == ".txt" else "pdf"
+    if ocr is not None and ocr.available():
+        recognized = ocr.file_text(path)
+        if recognized.strip():
+            return recognized, "ocr"
+    return text, ("txt" if path.suffix.lower() == ".txt" else "pdf") if text.strip() else None
+
+
+def ocr_document(conn, ocr, doc_id: int) -> int:
+    """Распознать текст заново (например, у документов, добавленных до установки OCR)."""
+    d = conn.execute("SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone()
+    if not d:
+        raise KeyError(doc_id)
+    path = current_file(d)
+    if not path.is_file():
+        raise FileNotFoundError(f"File not found: {path}")
+    text = ocr.file_text(path) if ocr is not None and ocr.available() else ""
+    if text.strip():
+        conn.execute("UPDATE documents SET text=?, text_source='ocr' WHERE id=?", (text, doc_id))
+    else:  # отметка, что пробовали: такие документы не попадают в очередь снова
+        conn.execute("UPDATE documents SET text_source='none' WHERE id=? AND text_source IS NULL", (doc_id,))
+    conn.commit()
+    return len(text.strip())
+
+
+def scan_inbox(conn, cfg, provider, ocr=None) -> dict:
     """Находит новые файлы во «Входящих» и анализирует. Файлы не изменяет."""
     inbox = Path(cfg["inbox_dir"])
     inbox.mkdir(parents=True, exist_ok=True)
@@ -54,9 +86,9 @@ def scan_inbox(conn, cfg, provider) -> dict:
         if known:
             stats["duplicates"] += 1
             continue
-        text = extract_text(path)
-        cur = conn.execute("INSERT INTO documents(sha256, orig_path, filename, text) VALUES (?,?,?,?)",
-                           (digest, str(path), path.name, text))
+        text, source = read_text(path, ocr)
+        cur = conn.execute("INSERT INTO documents(sha256, orig_path, filename, text, text_source) VALUES (?,?,?,?,?)",
+                           (digest, str(path), path.name, text, source))
         conn.commit()
         err = analyze_document(conn, cfg, provider, cur.lastrowid, stats)
         stats["errors" if err else "added"] += 1
@@ -95,8 +127,10 @@ def analyze_document(conn, cfg, provider, doc_id: int, stats: dict | None = None
         people = [p["name"] for p in conn.execute("SELECT name FROM people ORDER BY name")]
         prompt = build_prompt(people, db.labels(conn, "type"), db.labels(conn, "status"))
         mime = MIME.get(path.suffix.lower())
-        data = path.read_bytes() if (not doc["text"] and provider.supports_files) else None
-        r = provider.analyze(prompt, doc["text"], data, mime)
+        # ИИ, который сам читает сканы, получает файл: это точнее текста OCR. Локальной модели остаётся текст OCR.
+        send_file = provider.supports_files and doc["text_source"] not in ("pdf", "txt")
+        data = path.read_bytes() if send_file else None
+        r = provider.analyze(prompt, "" if send_file else doc["text"], data, mime)
         person, created = db.get_or_create_person(conn, r.get("recipient") or "")
         if created:
             stats["new_people"].append(person["name"])

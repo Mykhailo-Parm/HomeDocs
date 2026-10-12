@@ -22,18 +22,34 @@ class FakeProvider:
 
     def analyze(self, prompt, text, file_bytes, mime):
         self.seen_people.append(prompt)
+        self.last = (text, file_bytes)
         return {"title": "Рахунок за інтернет", "doc_type": "invoice", "doc_status": "to_pay", "summary": "Invoice.",
                 "language": "uk", "sender": "Kyivstar", "recipient": self.recipient, "doc_date": "2026-09-30",
                 "amount": 250.5, "currency": "UAH", "due_date": "2026-10-15", "tags": ["интернет"], "confidence": 0.9,
                 **self.extra}
 
 
-def make(tmp_path, provider, login=True):
+class FakeOCR:
+    def __init__(self, text="", ok=False):
+        self.text, self.ok, self.calls = text, ok, []
+
+    def available(self):
+        return self.ok
+
+    def status(self):
+        return {"engine": "fake", "available": self.ok, "enabled": True, "languages": ["ukr"] if self.ok else [], "missing": []}
+
+    def file_text(self, path):
+        self.calls.append(path.name)
+        return self.text if self.ok else ""
+
+
+def make(tmp_path, provider, login=True, ocr=None):
     cfg = config.load("nonexistent.toml")
     cfg.update(inbox_dir=str(tmp_path / "inbox"), archive_dir=str(tmp_path / "archive"), data_dir=str(tmp_path / "data"),
                trash_dir=str(tmp_path / "trash"))
     (tmp_path / "inbox").mkdir(exist_ok=True)
-    app = create_app(cfg, provider)
+    app = create_app(cfg, provider, ocr or FakeOCR())
     client = TestClient(app, headers=HDR)
     if login:
         auth.create_user(app.state.conn, "admin", "secret-pass", is_admin=True)
@@ -292,6 +308,66 @@ def test_all_documents_sort_and_date_filter(tmp_path):
     assert names(sort="person", order="asc") == ["b.txt", "a.txt", "c.txt"]
     assert names(date_from="2026-01-01", date_to="2026-02-01") == ["a.txt"]
     assert client.get("/api/documents").json()[0]["folder"] is None  # ещё во «Входящих»
+
+
+def test_ocr_text_for_scans(tmp_path):
+    ocr = FakeOCR("Рахунок Kyivstar 250,50 грн", ok=True)
+    prov = FakeProvider()
+    client, _ = make(tmp_path, prov, ocr=ocr)
+    (tmp_path / "inbox" / "scan.png").write_bytes(b"\x89PNG fake")
+    (tmp_path / "inbox" / "note.txt").write_text("Звичайний текстовий файл, OCR не потрібен", encoding="utf-8")
+    client.post("/api/scan")
+    assert ocr.calls == ["scan.png"]  # текстовому файлу OCR не нужен
+    scan = next(d for d in client.get("/api/documents").json() if d["filename"] == "scan.png")
+    full = client.get(f"/api/documents/{scan['id']}").json()
+    assert full["text_source"] == "ocr" and "Kyivstar" in full["text"]
+    # распознанный текст ищется
+    assert [d["filename"] for d in client.get("/api/documents", params={"q": "250,50"}).json()] == ["scan.png"]
+    # ИИ, умеющий читать файлы, всё равно получает сам скан, а не текст OCR
+    client.post(f"/api/documents/{scan['id']}/reanalyze")
+    assert prov.last == ("", b"\x89PNG fake")
+    prov.supports_files = False  # локальная модель получает текст OCR
+    client.post(f"/api/documents/{scan['id']}/reanalyze")
+    assert prov.last[0] == "Рахунок Kyivstar 250,50 грн" and prov.last[1] is None
+
+
+def test_ocr_backfill_for_old_documents(tmp_path):
+    ocr = FakeOCR()  # OCR ещё не установлен
+    client, _ = make(tmp_path, FakeProvider(), ocr=ocr)
+    for name in ("a.png", "b.png"):
+        (tmp_path / "inbox" / name).write_bytes(name.encode())
+    client.post("/api/scan")
+    assert client.get("/api/ocr/status").json()["pending"] == 2
+    assert client.post("/api/ocr/run").status_code == 400
+    ocr.ok, ocr.text = True, "Текст зі скану"  # «установили» Tesseract
+    r = client.post("/api/ocr/run", params={"limit": 1}).json()
+    assert r["done"] == 1 and r["recognized"] == 1 and r["pending"] == 1
+    ocr.text = ""  # на втором листе текста нет — он помечается и больше не стоит в очереди
+    assert client.post("/api/ocr/run").json()["pending"] == 0
+    sources = sorted(client.get(f"/api/documents/{d['id']}").json()["text_source"] for d in client.get("/api/documents").json())
+    assert sources == ["none", "ocr"]
+
+
+def test_real_tesseract_reads_image(tmp_path):
+    import pytest
+    from homedocs.ocr import TesseractOCR
+    engine = TesseractOCR({"languages": "ukr+deu+eng"})
+    if not engine.status()["available"]:
+        pytest.skip("Tesseract is not installed")
+    from PIL import Image, ImageDraw, ImageFont
+    try:
+        font = ImageFont.truetype("arial.ttf", 48)
+    except OSError:
+        pytest.skip("no TrueType font")
+    img = Image.new("RGB", (1400, 260), "white")
+    draw = ImageDraw.Draw(img)
+    draw.text((40, 40), "Rechnung Nr. 4471 Straße", fill="black", font=font)
+    draw.text((40, 140), "Рахунок до сплати 250", fill="black", font=font)
+    img.save(tmp_path / "scan.png")
+    text = engine.file_text(tmp_path / "scan.png")
+    assert "Rechnung" in text and "4471" in text
+    if "ukr" in engine.languages():
+        assert "Рахунок" in text
 
 
 def test_translit():

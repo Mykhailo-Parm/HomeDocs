@@ -122,6 +122,10 @@ dialog::backdrop { background: rgba(0,0,0,.4) }
 td.folder { font-size: 12.5px; color: var(--muted); max-width: 220px; word-break: break-word }
 td.folder a { color: inherit }
 
+details.doc-text { margin-top: 10px; font-size: 13px }
+details.doc-text summary { cursor: pointer; color: var(--muted) }
+details.doc-text textarea { width: 100%; margin: 6px 0; font: 12.5px/1.4 ui-monospace, Consolas, monospace; resize: vertical }
+
 /* рабочий стол */
 .desk-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px }
 .crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; font-size: 14px }

@@ -8,6 +8,15 @@ trash_dir   = "trash"      # корзина: сюда переносятся у�
 
 # Типы документов и статусы настраиваются в интерфейсе (⚙ Настройки), ИИ может добавлять новые сам.
 
+[ocr]
+# Распознавание текста на сканах и фото (без интернета). Нужен Tesseract:
+#   Windows: winget install UB-Mannheim.TesseractOCR   Linux: apt install tesseract-ocr tesseract-ocr-ukr tesseract-ocr-deu
+enabled       = true
+languages     = "ukr+deu+eng+rus"   # языки Tesseract через «+»
+tesseract_cmd = ""                  # путь к tesseract.exe, если не нашёлся сам
+dpi           = 300                 # чёткость страниц PDF для распознавания
+max_pages     = 15                  # сколько страниц PDF распознавать
+
 [ai]
 # Провайдер: "gemini" (бесплатный ключ), "ollama" (локально), "claude"
 provider = "gemini"

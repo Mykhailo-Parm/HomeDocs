@@ -131,7 +131,7 @@ class Ollama(Provider):
 
     def analyze(self, prompt, text, file_bytes, mime):
         if not text:
-            raise RuntimeError("The document has no text layer (scan). The local model needs OCR; use gemini/claude for scans for now")
+            raise RuntimeError("The document has no text (scan). Install Tesseract OCR (see README) or use gemini/claude for scans")
         r = httpx.post(f"{self.host}/api/chat", json={
             "model": self.model, "stream": False, "format": "json", "options": {"temperature": 0},
             "messages": [{"role": "system", "content": prompt},

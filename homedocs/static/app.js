@@ -654,6 +654,11 @@ function renderDetail() {
       <label class="full">${esc(t('f_summary'))}<textarea name="summary" rows="3">${v(d.summary)}</textarea></label>
     </form>
     ${d.archive_path && !d.trashed_at ? `<div class="muted small" style="margin-top:8px;word-break:break-all">${esc(t('archived_at', { path: d.archive_path }))}</div>` : ''}
+    <details class="doc-text" ${S.textOpen ? 'open' : ''}>
+      <summary>${esc(t('doc_text'))} <span class="pill">${esc(t('src_' + (d.text_source || 'none')))}</span></summary>
+      ${d.text ? `<textarea readonly rows="8">${esc(d.text)}</textarea>` : `<p class="muted small">${esc(t('no_text'))}</p>`}
+      ${S.meta && S.meta.ocr && S.meta.ocr.available && !d.trashed_at ? `<button class="small" data-act="ocr">${esc(t('run_ocr'))}</button>` : ''}
+    </details>
     ${d.trashed_at ? `
     <div class="actions">
       <button class="primary" data-act="restore">${esc(t('restore'))}</button>
@@ -726,6 +731,12 @@ $('#detail').addEventListener('click', async e => {
       if (r.new_types.length || r.new_statuses.length) await loadMeta();
       announceNew(r);
       await refresh(); await show(id);
+    } else if (act === 'ocr') {
+      b.disabled = true; toast(t('ocr_running'));
+      S.cur = await api(`/api/documents/${id}/ocr`, { method: 'POST' });
+      S.textOpen = true;
+      toast(S.cur.text_source === 'ocr' ? t('ocr_done_one', { n: S.cur.text.length }) : t('ocr_nothing'), S.cur.text_source === 'ocr' ? 'ok' : 'bad');
+      renderDetail();
     } else if (act === 'trash') {
       await trashDocs([id]);
     } else if (act === 'restore') {
@@ -737,6 +748,8 @@ $('#detail').addEventListener('click', async e => {
     }
   } catch (err) { fail(err); b.disabled = false; }
 });
+
+$('#detail').addEventListener('toggle', e => { if (e.target.matches('details.doc-text')) S.textOpen = e.target.open; }, true);
 
 $('#detail').addEventListener('change', async e => {
   const sel = e.target.closest('select[data-kind]');
@@ -849,7 +862,7 @@ document.addEventListener('keydown', e => {
 
 // ---------- настройки ----------
 
-const TABS = ['types', 'statuses', 'people', 'account', 'users'];
+const TABS = ['types', 'statuses', 'people', 'ocr', 'account', 'users'];
 $('#settingsBtn').addEventListener('click', () => { renderSettings(); $('#settings').showModal(); });
 async function afterSettings() {
   await Promise.all([loadMeta(), loadPeople()]).catch(fail);
@@ -865,12 +878,13 @@ $('#tabs').addEventListener('click', e => {
 async function renderSettings() {
   const tabs = TABS.filter(x => x !== 'users' || S.user.is_admin);
   if (!tabs.includes(S.tab)) S.tab = 'types';
-  const title = { types: 's_types', statuses: 's_statuses', people: 's_people', account: 's_account', users: 's_users' };
+  const title = { types: 's_types', statuses: 's_statuses', people: 's_people', ocr: 's_ocr', account: 's_account', users: 's_users' };
   $('#tabs').innerHTML = tabs.map(x => `<button data-tab="${x}" class="${x === S.tab ? 'on' : ''}">${esc(t(title[x]))}</button>`).join('');
   const body = $('#settingsBody');
   try {
     if (S.tab === 'types' || S.tab === 'statuses') { await loadMeta(); body.innerHTML = labelsHtml(S.tab === 'types' ? 'type' : 'status'); }
     else if (S.tab === 'people') { await loadPeople(); body.innerHTML = peopleHtml(); }
+    else if (S.tab === 'ocr') body.innerHTML = ocrHtml(await api('/api/ocr/status'));
     else if (S.tab === 'account') body.innerHTML = accountHtml();
     else if (S.tab === 'users') body.innerHTML = usersHtml(await api('/api/users'));
   } catch (e) { fail(e); }
@@ -901,6 +915,30 @@ function peopleHtml() {
       <select class="small" data-f="merge"><option value="">${esc(t('merge_into'))}</option>${S.people.filter(o => o.id !== p.id).map(o => `<option value="${o.id}">${esc(o.name)}</option>`).join('')}</select></td></tr>`).join('');
   return `<div class="table-wrap"><table><thead><tr><th>${esc(t('name'))}</th><th>${esc(t('aliases'))}</th><th>${esc(t('docs'))}</th><th></th></tr></thead>
     <tbody>${rows || `<tr><td colspan="4" class="empty">—</td></tr>`}</tbody></table></div>`;
+}
+
+function ocrHtml(st) {
+  const state = st.available
+    ? `<div class="alert info">✅ ${esc(t('ocr_ready', { langs: st.languages.join(', ') }))}</div>`
+    : `<div class="alert warn">${esc(t('ocr_missing'))}</div>`;
+  const missing = st.available && st.missing.length ? `<p class="muted small">${esc(t('ocr_missing_langs', { langs: st.missing.join(', ') }))}</p>` : '';
+  return `<p class="muted small" style="margin-top:0">${esc(t('ocr_hint'))}</p>${state}${missing}
+    <p>${esc(t('ocr_pending', { n: st.pending }))}</p>
+    ${st.available && st.pending ? `<button class="primary" data-sact="ocr-run">${esc(t('ocr_run_all', { n: st.pending }))}</button>` : ''}
+    <div class="muted small" id="ocrProgress" style="margin-top:8px"></div>`;
+}
+
+async function ocrRunAll(btn) {
+  btn.disabled = true;
+  let total = 0, recognized = 0, r;
+  do {
+    r = await api('/api/ocr/run?limit=2', { method: 'POST' });
+    total += r.done; recognized += r.recognized;
+    $('#ocrProgress').textContent = t('ocr_progress', { done: total, left: r.pending });
+  } while (r.done && r.pending && $('#settings').open);
+  toast(t('ocr_done', { n: recognized }), 'ok');
+  await loadMeta();
+  if ($('#settings').open) renderSettings();
 }
 
 function accountHtml() {
@@ -934,6 +972,7 @@ $('#settingsBody').addEventListener('click', async e => {
   if (!b) return;
   const act = b.dataset.sact;
   try {
+    if (act === 'ocr-run') { await ocrRunAll(b); return; }
     if (act === 'label-add') {
       const row = b.closest('.addrow'), kind = row.dataset.kind;
       const names = Object.fromEntries($$('[data-new]', row).map(i => [i.dataset.new, i.value.trim()]).filter(([, v]) => v));
