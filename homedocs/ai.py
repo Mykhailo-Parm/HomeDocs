@@ -62,6 +62,7 @@ class Gemini(Provider):
         if not cfg["api_key"]:
             raise RuntimeError("Не задан ключ Gemini (api_key в config.toml или GEMINI_API_KEY)")
         self.key, self.model = cfg["api_key"], cfg["model"]
+        self.models = [self.model] + [m for m in cfg.get("fallback_models", []) if m != self.model]
 
     def analyze(self, prompt, text, file_bytes, mime):
         parts = [{"text": prompt}]
@@ -69,17 +70,24 @@ class Gemini(Provider):
             parts.append({"text": "Текст документа:\n" + text})
         elif file_bytes:
             parts.append({"inline_data": {"mime_type": mime, "data": base64.b64encode(file_bytes).decode()}})
-        # 429/500/503 у Gemini часто временные ("high demand"): повторяем с паузой
-        for attempt in range(4):
-            r = httpx.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent",
-                headers={"x-goog-api-key": self.key},
-                json={"contents": [{"parts": parts}],
-                      "generationConfig": {"responseMimeType": "application/json", "temperature": 0}},
-                timeout=120)
-            if r.status_code not in (429, 500, 503) or attempt == 3:
-                break
-            time.sleep(2 ** (attempt + 1))
+        # 429/500/503 у Gemini часто временные ("high demand"): пробуем запасные модели, затем повторяем с паузой
+        for attempt in range(3):
+            for model in self.models:
+                r = httpx.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                    headers={"x-goog-api-key": self.key},
+                    json={"contents": [{"parts": parts}],
+                          "generationConfig": {"responseMimeType": "application/json", "temperature": 0}},
+                    timeout=120)
+                if r.status_code not in (404, 429, 500, 503):
+                    break
+            else:
+                if attempt < 2:
+                    time.sleep(3 * (attempt + 1))
+                    continue
+            break
+        if r.status_code in (429, 500, 503):
+            raise RuntimeError("Gemini сейчас перегружен (Google отвечает %d). Попробуй ещё раз через пару минут" % r.status_code)
         r.raise_for_status()
         return parse_json(r.json()["candidates"][0]["content"]["parts"][0]["text"])
 

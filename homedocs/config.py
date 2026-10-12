@@ -11,7 +11,8 @@ DEFAULTS = {
                   "банк", "работа", "школа", "письмо", "другое"],
     "ai": {
         "provider": "gemini",
-        "gemini": {"model": "gemini-3.5-flash", "api_key": ""},
+        "gemini": {"model": "gemini-3.5-flash", "api_key": "",
+                   "fallback_models": ["gemini-flash-latest", "gemini-3.8-flash", "gemini-flash-lite-latest"]},
         "claude": {"model": "claude-haiku-5-5", "api_key": ""},
         "ollama": {"model": "qwen2.5:7b", "host": "http://localhost:11434"},
     },

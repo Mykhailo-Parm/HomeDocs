@@ -29,7 +29,12 @@ def scan_inbox(conn, cfg, provider) -> dict:
             continue
         stats["found"] += 1
         digest = sha256(path)
-        if conn.execute("SELECT 1 FROM documents WHERE sha256=?", (digest,)).fetchone():
+        known = conn.execute("SELECT id, status FROM documents WHERE sha256=?", (digest,)).fetchone()
+        if known and known["status"] == "error":  # прошлый разбор не удался — пробуем снова
+            err = analyze_document(conn, cfg, provider, known["id"], stats["new_people"])
+            stats["errors" if err else "added"] += 1
+            continue
+        if known:
             stats["duplicates"] += 1
             continue
         text = extract_text(path)

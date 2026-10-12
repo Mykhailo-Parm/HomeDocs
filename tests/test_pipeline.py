@@ -67,6 +67,23 @@ def test_provider_error_marks_document(tmp_path):
     assert client.get("/api/documents").json()[0]["status"] == "error"
 
 
+def test_rescan_retries_failed_document(tmp_path):
+    class Flaky(FakeProvider):
+        fail = True
+        def analyze(self, *a):
+            if self.fail:
+                raise RuntimeError("503")
+            return super().analyze(*a)
+    prov = Flaky()
+    client, _ = make(tmp_path, prov)
+    (tmp_path / "inbox" / "a.txt").write_text("a", encoding="utf-8")
+    assert client.post("/api/scan").json()["errors"] == 1
+    prov.fail = False
+    r = client.post("/api/scan").json()
+    assert r["added"] == 1 and r["duplicates"] == 0
+    assert client.get("/api/documents").json()[0]["status"] == "analyzed"
+
+
 def test_parse_json_handles_fences():
     assert parse_json('```json\n{"a": 1}\n```') == {"a": 1}
     assert parse_json('Вот: {"a": 2}') == {"a": 2}
