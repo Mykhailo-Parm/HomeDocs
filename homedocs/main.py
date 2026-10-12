@@ -2,6 +2,7 @@
 import csv
 import io
 import json
+import shutil
 from datetime import date
 from pathlib import Path
 
@@ -13,7 +14,7 @@ from pydantic import BaseModel
 from . import auth, config, db, pipeline
 from .ai import make_provider
 from .extract import MIME, SUPPORTED
-from .translit import to_latin
+from .translit import safe_name, to_latin
 
 STATIC = Path(__file__).parent / "static"
 EDITABLE = {"title", "doc_type", "doc_status", "summary", "sender", "doc_date", "amount", "currency", "due_date",
@@ -196,7 +197,7 @@ def create_app(cfg: dict | None = None, provider=None) -> FastAPI:
 
     def query_docs(q="", person="", doc_type="", status="", doc_status="", due="", sort="added_at", order="desc"):
         sort = sort if sort in {"added_at", "doc_date", "amount", "title", "due_date", "doc_type", "doc_status"} else "added_at"
-        where, args = [], []
+        where, args = ["d.trashed_at IS NULL"], []
         if q:
             like = f"%{q}%"
             where.append("(d.title LIKE ? OR d.summary LIKE ? OR d.sender LIKE ? OR d.text LIKE ? OR d.filename LIKE ? OR d.tags LIKE ?)")
@@ -224,15 +225,17 @@ def create_app(cfg: dict | None = None, provider=None) -> FastAPI:
 
     @api.get("/stats")
     def stats():
+        live = "FROM documents WHERE trashed_at IS NULL"
         one = lambda sql, *a: conn.execute(sql, a).fetchone()[0]
         today = date.today().isoformat()
-        return {"total": one("SELECT COUNT(*) FROM documents"),
-                "review": one("SELECT COUNT(*) FROM documents WHERE status='analyzed'"),
-                "errors": one("SELECT COUNT(*) FROM documents WHERE status='error'"),
-                "to_pay": one("SELECT COUNT(*) FROM documents WHERE doc_status='to_pay'"),
+        return {"total": one(f"SELECT COUNT(*) {live}"),
+                "review": one(f"SELECT COUNT(*) {live} AND status='analyzed'"),
+                "errors": one(f"SELECT COUNT(*) {live} AND status='error'"),
+                "to_pay": one(f"SELECT COUNT(*) {live} AND doc_status='to_pay'"),
                 "to_pay_sum": {c or "": round(s, 2) for c, s in conn.execute(
-                    "SELECT currency, SUM(amount) FROM documents WHERE doc_status='to_pay' AND amount IS NOT NULL GROUP BY currency")},
-                "overdue": one("SELECT COUNT(*) FROM documents WHERE due_date < ? AND doc_status IN ('to_pay','action')", today)}
+                    f"SELECT currency, SUM(amount) {live} AND doc_status='to_pay' AND amount IS NOT NULL GROUP BY currency")},
+                "overdue": one(f"SELECT COUNT(*) {live} AND due_date < ? AND doc_status IN ('to_pay','action')", today),
+                "trash": one("SELECT COUNT(*) FROM documents WHERE trashed_at IS NOT NULL")}
 
     @api.get("/documents/{doc_id}")
     def document(doc_id: int):
@@ -274,16 +277,9 @@ def create_app(cfg: dict | None = None, provider=None) -> FastAPI:
         conn.commit()
         return document(doc_id)
 
-    @api.delete("/documents/{doc_id}")
-    def remove(doc_id: int):
-        """Убирает документ из списка. Файлы (оригинал и копия в архиве) не трогаются."""
-        conn.execute("DELETE FROM documents WHERE id=?", (doc_id,))
-        conn.commit()
-        return {"ok": True}
-
-    def do_approve(doc_id: int):
+    def do_approve(doc_id: int, folder: Path | None = None):
         try:
-            return pipeline.approve(conn, cfg, doc_id)
+            return pipeline.approve(conn, cfg, doc_id, folder)
         except KeyError:
             raise HTTPException(404)
         except FileNotFoundError as e:
@@ -309,6 +305,186 @@ def create_app(cfg: dict | None = None, provider=None) -> FastAPI:
                 failed.append(i)
         return {"approved": len(done), "failed": failed}
 
+    # ---------- корзина ----------
+
+    def each(ids, fn):
+        n = 0
+        for i in ids:
+            try:
+                fn(conn, cfg, i); n += 1
+            except KeyError:
+                pass
+        return {"done": n}
+
+    @api.post("/documents/trash")
+    def to_trash(body: Ids):
+        return each(body.ids, pipeline.trash)
+
+    @api.post("/documents/restore")
+    def restore(body: Ids):
+        return each(body.ids, pipeline.restore)
+
+    @api.post("/documents/purge")
+    def purge(body: Ids):
+        """Окончательно удалить с диска (только из корзины)."""
+        return each(body.ids, pipeline.purge)
+
+    @api.post("/trash/empty")
+    def empty_trash():
+        return each([r[0] for r in conn.execute("SELECT id FROM documents WHERE trashed_at IS NOT NULL")], pipeline.purge)
+
+    # ---------- папки на диске («рабочий стол») ----------
+
+    def archive_root() -> Path:
+        root = Path(cfg["archive_dir"]).resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    def archive_path(rel: str) -> Path:
+        """Путь внутри архива; выйти за его пределы нельзя."""
+        root = archive_root()
+        p = (root / (rel or "").strip("/\\")).resolve()
+        if not p.is_relative_to(root):
+            raise HTTPException(400, "Path outside archive")
+        return p
+
+    def rel_of(p: Path) -> str:
+        return p.resolve().relative_to(archive_root()).as_posix()
+
+    def doc_brief(r):
+        d = row(r)
+        return {k: d.get(k) for k in ("id", "title", "filename", "status", "doc_type", "doc_status", "person", "doc_date",
+                                      "amount", "currency", "due_date", "trashed_at", "sender")}
+
+    @api.get("/fs")
+    def fs_list(path: str = ""):
+        if path == "@inbox":
+            # необработанные документы и ещё не отсканированные файлы во «Входящих»
+            docs = conn.execute(SELECT + " WHERE d.trashed_at IS NULL AND d.status<>'approved' ORDER BY d.added_at DESC").fetchall()
+            known = {Path(r[0]).resolve() for r in conn.execute("SELECT orig_path FROM documents")}
+            inbox = Path(cfg["inbox_dir"])
+            loose = [p for p in sorted(inbox.rglob("*")) if p.is_file() and p.suffix.lower() in SUPPORTED
+                     and p.resolve() not in known] if inbox.exists() else []
+            files = [{"name": r["filename"], "doc": doc_brief(r)} for r in docs]
+            files += [{"name": p.name, "path": "@inbox/" + p.relative_to(inbox).as_posix(), "doc": None} for p in loose]
+            return {"path": path, "folders": [], "files": files}
+        if path == "@trash":
+            docs = conn.execute(SELECT + " WHERE d.trashed_at IS NOT NULL ORDER BY d.trashed_at DESC").fetchall()
+            return {"path": path, "folders": [], "files": [{"name": r["filename"], "doc": doc_brief(r)} for r in docs]}
+        base = archive_path(path)
+        if not base.is_dir():
+            raise HTTPException(404, "Folder not found")
+        docs = {Path(r["archive_path"]).resolve(): r for r in conn.execute(
+            SELECT + " WHERE d.archive_path IS NOT NULL AND d.trashed_at IS NULL")}
+        folders, files = [], []
+        for e in sorted(base.iterdir(), key=lambda e: e.name.casefold()):
+            if e.name.startswith("."):
+                continue
+            if e.is_dir():
+                folders.append({"name": e.name, "path": rel_of(e), "count": sum(1 for f in e.rglob("*") if f.is_file())})
+            elif e.is_file():
+                d = docs.get(e.resolve())
+                files.append({"name": e.name, "path": rel_of(e), "doc": doc_brief(d) if d else None})
+        out = {"path": rel_of(base) if base != archive_root() else "", "folders": folders, "files": files}
+        if not out["path"]:
+            st = stats()
+            out["specials"] = {"inbox": st["review"] + st["errors"], "trash": st["trash"]}
+        return out
+
+    @api.get("/fs/file")
+    def fs_file(path: str, download: bool = False):
+        if path.startswith("@inbox/"):
+            inbox = Path(cfg["inbox_dir"]).resolve()
+            p = (inbox / path[len("@inbox/"):]).resolve()
+            if not p.is_relative_to(inbox):
+                raise HTTPException(400, "Path outside inbox")
+        else:
+            p = archive_path(path)
+        if not p.is_file():
+            raise HTTPException(404)
+        return FileResponse(p, media_type=MIME.get(p.suffix.lower(), "application/octet-stream"), filename=p.name,
+                            content_disposition_type="attachment" if download else "inline",
+                            headers={"Content-Security-Policy": "frame-ancestors 'self'"})
+
+    class FolderBody(BaseModel):
+        path: str = ""
+        name: str
+
+    @api.post("/fs/folder")
+    def fs_mkdir(body: FolderBody):
+        name = safe_name(body.name, 60, "")
+        if not name:
+            raise HTTPException(400, "Name is empty")
+        p = archive_path(body.path) / name
+        if p.exists():
+            raise HTTPException(409, "Already exists")
+        p.mkdir(parents=True)
+        return {"path": rel_of(p)}
+
+    @api.post("/fs/rename")
+    def fs_rename(body: FolderBody):
+        src = archive_path(body.path)
+        if src == archive_root() or not src.exists():
+            raise HTTPException(404)
+        name = safe_name(body.name, 120, "")
+        if not name:
+            raise HTTPException(400, "Name is empty")
+        if src.is_file() and Path(name).suffix.lower() != src.suffix.lower():
+            name += src.suffix.lower()  # расширение файла не меняется
+        dest = src.with_name(name)
+        if dest.exists() and dest != src:
+            raise HTTPException(409, "Already exists")
+        src.rename(dest)
+        pipeline.repoint(conn, src, dest)
+        return {"path": rel_of(dest)}
+
+    @api.delete("/fs/folder")
+    def fs_rmdir(path: str):
+        p = archive_path(path)
+        if p == archive_root() or not p.is_dir():
+            raise HTTPException(404)
+        if any(f.is_file() for f in p.rglob("*")):
+            raise HTTPException(409, "Folder is not empty")
+        shutil.rmtree(p)
+        return {"ok": True}
+
+    class MoveBody(BaseModel):
+        to: str = ""
+        paths: list[str] = []
+        doc_ids: list[int] = []
+
+    @api.post("/fs/move")
+    def fs_move(body: MoveBody):
+        """Перенос файлов/папок архива в папку. Документы из «Входящих» при этом раскладываются в неё."""
+        target = archive_path(body.to)
+        if not target.is_dir():
+            raise HTTPException(404, "Folder not found")
+        moved = 0
+        for rel in body.paths:
+            src = archive_path(rel)
+            if not src.exists() or src == archive_root() or src.parent == target:
+                continue
+            if src.is_dir() and (target == src or target.is_relative_to(src)):
+                raise HTTPException(400, "Cannot move a folder into itself")
+            dest = pipeline.unique(target / src.name)
+            shutil.move(str(src), dest)
+            pipeline.repoint(conn, src, dest)
+            moved += 1
+        for i in body.doc_ids:
+            r = conn.execute("SELECT status, archive_path FROM documents WHERE id=? AND trashed_at IS NULL", (i,)).fetchone()
+            if not r:
+                continue
+            if r["status"] == "approved" and r["archive_path"] and Path(r["archive_path"]).is_file():
+                src = Path(r["archive_path"])
+                if src.parent.resolve() != target:
+                    dest = pipeline.unique(target / src.name)
+                    shutil.move(str(src), dest)
+                    pipeline.repoint(conn, src, dest)
+            else:
+                do_approve(i, target)
+            moved += 1
+        return {"moved": moved}
+
     @api.post("/documents/{doc_id}/reanalyze")
     def reanalyze(doc_id: int, provider=Depends(get_provider)):
         stats = pipeline.new_stats()
@@ -322,15 +498,16 @@ def create_app(cfg: dict | None = None, provider=None) -> FastAPI:
         if not p:
             return None
         path = Path(p).resolve()
-        roots = [Path(cfg["inbox_dir"]).resolve(), Path(cfg["archive_dir"]).resolve()]
+        roots = [Path(cfg[k]).resolve() for k in ("inbox_dir", "archive_dir", "trash_dir")]
         return path if path.is_file() and any(path.is_relative_to(r) for r in roots) else None
 
     @api.get("/documents/{doc_id}/file")
     def file(doc_id: int, download: bool = False):
-        r = conn.execute("SELECT orig_path, archive_path, filename FROM documents WHERE id=?", (doc_id,)).fetchone()
+        r = conn.execute("SELECT orig_path, archive_path, trash_info FROM documents WHERE id=?", (doc_id,)).fetchone()
         if not r:
             raise HTTPException(404)
-        for p in (r["archive_path"], r["orig_path"]):
+        in_trash = [now for _, now in json.loads(r["trash_info"] or "{}").values()]
+        for p in (r["archive_path"], r["orig_path"], *in_trash):
             path = allowed_file(p)
             if path:
                 return FileResponse(path, media_type=MIME.get(path.suffix.lower(), "application/octet-stream"),
@@ -432,7 +609,7 @@ def create_app(cfg: dict | None = None, provider=None) -> FastAPI:
     @api.get("/people")
     def people():
         return [{"id": p["id"], "name": p["name"], "aliases": json.loads(p["aliases"]),
-                 "documents": conn.execute("SELECT COUNT(*) FROM documents WHERE person_id=?", (p["id"],)).fetchone()[0]}
+                 "documents": conn.execute("SELECT COUNT(*) FROM documents WHERE person_id=? AND trashed_at IS NULL", (p["id"],)).fetchone()[0]}
                 for p in conn.execute("SELECT * FROM people ORDER BY name")]
 
     class PersonPatch(BaseModel):

@@ -117,6 +117,44 @@ dialog::backdrop { background: rgba(0,0,0,.4) }
 .addrow input { flex: 1 1 140px }
 .form-col { display: grid; gap: 8px; max-width: 360px }
 
+/* рабочий стол */
+.desk-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px }
+.crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; font-size: 14px }
+.crumbs button { border-color: transparent; background: transparent; padding: 4px 8px }
+.crumbs button:last-child { font-weight: 600 }
+.crumbs .sep { color: var(--muted) }
+.desk { display: grid; grid-template-columns: repeat(auto-fill, minmax(124px, 1fr)); gap: 10px; min-height: 240px; align-content: start;
+  background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px }
+.tile { position: relative; display: flex; flex-direction: column; align-items: center; text-align: center; gap: 4px; padding: 10px 6px 8px;
+  border: 1px solid transparent; border-radius: 10px; cursor: pointer; user-select: none; min-width: 0 }
+.tile:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); border-color: var(--line) }
+.tile.sel { background: color-mix(in srgb, var(--accent) 15%, transparent); border-color: var(--accent) }
+.tile.drop-on { outline: 2px dashed var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent) }
+.tile .ic { width: 64px; height: 64px; display: grid; place-items: center; font-size: 44px; line-height: 1 }
+.tile .ic img { max-width: 64px; max-height: 64px; border-radius: 4px; border: 1px solid var(--line); object-fit: cover }
+.tile .nm { font-size: 12.5px; line-height: 1.25; max-width: 100%; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; word-break: break-word }
+.tile .sub { font-size: 11px; color: var(--muted) }
+.tile .badge { position: absolute; top: 6px; right: 14px; min-width: 20px; padding: 1px 6px; border-radius: 10px; background: var(--warn); color: #fff; font-size: 11px; font-weight: 700 }
+.tile .dot { position: absolute; top: 10px; left: 12px; width: 9px; height: 9px; border-radius: 50% }
+.dot.analyzed { background: var(--warn) } .dot.error { background: var(--bad) }
+.tile-act { position: absolute; top: 2px; right: 2px; display: none; gap: 2px }
+.tile:hover .tile-act { display: flex }
+.tile-act button { padding: 1px 6px; font-size: 12px; background: var(--card) }
+.desk .empty { grid-column: 1 / -1 }
+.desk-hint { margin-top: 8px }
+.crumbs button.drop-on { outline: 2px dashed var(--accent) }
+
+/* подтверждение кодом */
+#codeDlg { width: min(420px, calc(100vw - 24px)) }
+.code-form { padding: 18px }
+.code-form p { margin: 0 0 12px }
+.code-row { display: flex; gap: 12px; align-items: center; margin: 6px 0 4px }
+.code { font: 700 28px/1 ui-monospace, Consolas, monospace; letter-spacing: 6px; padding: 8px 12px; border-radius: 8px; background: var(--card2); border: 1px solid var(--line); user-select: none }
+.code-row input { width: 90px; font: 700 22px ui-monospace, Consolas, monospace; letter-spacing: 4px; text-align: center }
+button.danger-solid { background: var(--bad); color: #fff; border-color: var(--bad); font-weight: 600 }
+.alert.info { color: var(--muted); border-color: var(--line) }
+.toast button { margin-left: 10px }
+
 #toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 60; max-width: min(420px, calc(100vw - 32px)) }
 .toast { background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 8px; padding: 10px 12px; box-shadow: var(--shadow); font-size: 13.5px }
 .toast.bad { border-left-color: var(--bad) } .toast.ok { border-left-color: var(--ok) }

@@ -15,7 +15,22 @@ def suggest_name(d: dict, ext: str) -> str:
 
 
 def new_stats() -> dict:
-    return {"found": 0, "added": 0, "duplicates": 0, "errors": 0, "new_people": [], "new_types": [], "new_statuses": []}
+    return {"found": 0, "added": 0, "duplicates": 0, "errors": 0, "in_trash": 0,
+            "new_people": [], "new_types": [], "new_statuses": []}
+
+
+def unique(dest: Path) -> Path:
+    """Свободное имя: «файл (2).pdf», если такое уже есть."""
+    n, cand = 1, dest
+    while cand.exists():
+        n += 1
+        cand = dest.with_name(f"{dest.stem} ({n}){dest.suffix}")
+    return cand
+
+
+def inside(path: Path, *roots) -> bool:
+    path = path.resolve()
+    return any(path.is_relative_to(Path(r).resolve()) for r in roots)
 
 
 def scan_inbox(conn, cfg, provider) -> dict:
@@ -28,7 +43,10 @@ def scan_inbox(conn, cfg, provider) -> dict:
             continue
         stats["found"] += 1
         digest = sha256(path)
-        known = conn.execute("SELECT id, status FROM documents WHERE sha256=?", (digest,)).fetchone()
+        known = conn.execute("SELECT id, status, trashed_at FROM documents WHERE sha256=?", (digest,)).fetchone()
+        if known and known["trashed_at"]:  # такой документ лежит в корзине — восстанавливать оттуда
+            stats["in_trash"] += 1
+            continue
         if known and known["status"] == "error":  # прошлый разбор не удался — пробуем снова
             err = analyze_document(conn, cfg, provider, known["id"], stats)
             stats["errors" if err else "added"] += 1
@@ -92,8 +110,9 @@ def analyze_document(conn, cfg, provider, doc_id: int, stats: dict | None = None
         return str(e)
 
 
-def approve(conn, cfg, doc_id: int) -> str:
-    """Копирует файл в Архив/Человек/Тип/Имя (всё латиницей). Оригинал во «Входящих» остаётся нетронутым."""
+def approve(conn, cfg, doc_id: int, folder: Path | None = None) -> str:
+    """Копирует файл в Архив/Человек/Тип/Имя (всё латиницей) или в выбранную папку архива.
+    Оригинал во «Входящих» остаётся нетронутым."""
     d = conn.execute("SELECT d.*, p.name AS person FROM documents d LEFT JOIN people p ON p.id=d.person_id WHERE d.id=?",
                      (doc_id,)).fetchone()
     if not d:
@@ -101,20 +120,81 @@ def approve(conn, cfg, doc_id: int) -> str:
     src = Path(d["orig_path"])
     if not src.exists():
         raise FileNotFoundError(f"Original file not found: {src}")
-    type_name = db.label_name(conn, "type", d["doc_type"], "en") or d["doc_type"] or "Other"
-    folder = Path(cfg["archive_dir"]) / safe_name(d["person"] or "", fallback="Unknown") / safe_name(type_name, fallback="Other")
+    if folder is None:
+        type_name = db.label_name(conn, "type", d["doc_type"], "en") or d["doc_type"] or "Other"
+        folder = Path(cfg["archive_dir"]) / safe_name(d["person"] or "", fallback="Unknown") / safe_name(type_name, fallback="Other")
     folder.mkdir(parents=True, exist_ok=True)
     ext = src.suffix.lower()
     base = d["suggested_name"] or src.name
     if Path(base).suffix.lower() in SUPPORTED:
         base = base[: -len(Path(base).suffix)]
-    name = safe_name(base, 120, "document") + ext
-    dest, n = folder / name, 1
-    while dest.exists():
-        n += 1
-        dest = folder / f"{Path(name).stem} ({n}){ext}"
+    dest = unique(folder / (safe_name(base, 120, "document") + ext))
     shutil.copy2(src, dest)
     conn.execute("UPDATE documents SET status='approved', archive_path=?, suggested_name=? WHERE id=?",
                  (str(dest), dest.name, doc_id))
     conn.commit()
     return str(dest)
+
+
+def repoint(conn, old: Path, new: Path):
+    """После переноса файла/папки в архиве обновляет archive_path у документов внутри."""
+    old, new = old.resolve(), new.resolve()
+    for r in conn.execute("SELECT id, archive_path FROM documents WHERE archive_path IS NOT NULL").fetchall():
+        p = Path(r["archive_path"]).resolve()
+        if p == old or p.is_relative_to(old):
+            conn.execute("UPDATE documents SET archive_path=? WHERE id=?", (str(new / p.relative_to(old)), r["id"]))
+    conn.commit()
+
+
+def trash(conn, cfg, doc_id: int):
+    """В корзину: файлы (копия в архиве и оригинал во «Входящих») переносятся в папку корзины, их можно вернуть."""
+    d = conn.execute("SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone()
+    if not d:
+        raise KeyError(doc_id)
+    if d["trashed_at"]:
+        return
+    folder = Path(cfg["trash_dir"]) / str(doc_id)
+    moved = {}
+    for col, prefix in (("orig_path", "inbox"), ("archive_path", "archive")):
+        p = Path(d[col]) if d[col] else None
+        if p and p.is_file() and inside(p, cfg["inbox_dir"], cfg["archive_dir"]):
+            folder.mkdir(parents=True, exist_ok=True)
+            dest = unique(folder / f"{prefix}_{p.name}")
+            shutil.move(str(p), dest)
+            moved[col] = [str(p), str(dest)]
+    conn.execute("UPDATE documents SET trashed_at=datetime('now'), trash_info=? WHERE id=?", (json.dumps(moved), doc_id))
+    conn.commit()
+
+
+def restore(conn, cfg, doc_id: int):
+    """Из корзины обратно на прежние места (если место занято — с номером в имени)."""
+    d = conn.execute("SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone()
+    if not d or not d["trashed_at"]:
+        raise KeyError(doc_id)
+    for col, (original, now) in json.loads(d["trash_info"] or "{}").items():
+        if Path(now).is_file():
+            dest = unique(Path(original))
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(now, dest)
+            conn.execute(f"UPDATE documents SET {col}=? WHERE id=?", (str(dest), doc_id))
+    conn.execute("UPDATE documents SET trashed_at=NULL, trash_info=NULL WHERE id=?", (doc_id,))
+    conn.commit()
+    folder = Path(cfg["trash_dir"]) / str(doc_id)
+    if folder.is_dir() and not any(folder.iterdir()):
+        folder.rmdir()
+
+
+def purge(conn, cfg, doc_id: int):
+    """Окончательное удаление с диска. Только для документов из корзины."""
+    d = conn.execute("SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone()
+    if not d or not d["trashed_at"]:
+        raise KeyError(doc_id)
+    for _, now in json.loads(d["trash_info"] or "{}").values():
+        p = Path(now)
+        if p.is_file() and inside(p, cfg["trash_dir"]):
+            p.unlink()
+    folder = Path(cfg["trash_dir"]) / str(doc_id)
+    if folder.is_dir() and not any(folder.iterdir()):
+        folder.rmdir()
+    conn.execute("DELETE FROM documents WHERE id=?", (doc_id,))
+    conn.commit()

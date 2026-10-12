@@ -6,4 +6,5 @@ config.toml
 data/
 inbox/
 archive/
+trash/
 .pytest_cache/

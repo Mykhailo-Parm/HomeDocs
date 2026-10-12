@@ -30,7 +30,8 @@ class FakeProvider:
 
 def make(tmp_path, provider, login=True):
     cfg = config.load("nonexistent.toml")
-    cfg.update(inbox_dir=str(tmp_path / "inbox"), archive_dir=str(tmp_path / "archive"), data_dir=str(tmp_path / "data"))
+    cfg.update(inbox_dir=str(tmp_path / "inbox"), archive_dir=str(tmp_path / "archive"), data_dir=str(tmp_path / "data"),
+               trash_dir=str(tmp_path / "trash"))
     (tmp_path / "inbox").mkdir(exist_ok=True)
     app = create_app(cfg, provider)
     client = TestClient(app, headers=HDR)
@@ -194,6 +195,67 @@ def test_migrates_old_russian_types(tmp_path):
     types = {r[0] for r in conn.execute("SELECT doc_type FROM documents")}
     assert "school" in types and len(types) == 2 and "хобби" not in types
     assert any(l["names"]["en"] == "хобби" for l in db.labels(conn, "type"))
+
+
+def test_trash_restore_and_purge(tmp_path):
+    client, _ = make(tmp_path, FakeProvider())
+    src = tmp_path / "inbox" / "a.txt"
+    src.write_text("a", encoding="utf-8")
+    client.post("/api/scan")
+    doc = client.get("/api/documents").json()[0]
+    archived = Path(client.post(f"/api/documents/{doc['id']}/approve").json()["archive_path"])
+    assert client.post("/api/documents/trash", json={"ids": [doc["id"]]}).json()["done"] == 1
+    # файлы перенесены в корзину, документ исчез из списка, но открывается
+    assert not src.exists() and not archived.exists()
+    assert client.get("/api/documents").json() == [] and client.get("/api/stats").json()["trash"] == 1
+    assert client.get(f"/api/documents/{doc['id']}/file").text == "a"
+    assert [f["doc"]["id"] for f in client.get("/api/fs", params={"path": "@trash"}).json()["files"]] == [doc["id"]]
+    # тот же файл снова во «Входящих» не добавляется как новый
+    src.write_text("a", encoding="utf-8")
+    assert client.post("/api/scan").json()["in_trash"] == 1
+    src.unlink()
+    client.post("/api/documents/restore", json={"ids": [doc["id"]]})
+    assert src.exists() and archived.exists() and len(client.get("/api/documents").json()) == 1
+    # окончательно удалить можно только из корзины
+    client.post("/api/documents/purge", json={"ids": [doc["id"]]})
+    assert archived.exists()
+    client.post("/api/documents/trash", json={"ids": [doc["id"]]})
+    client.post("/api/trash/empty")
+    assert not src.exists() and not archived.exists()
+    assert client.get(f"/api/documents/{doc['id']}").status_code == 404
+    assert not any((tmp_path / "trash").rglob("*.txt"))
+
+
+def test_desktop_folders(tmp_path):
+    client, cfg = make(tmp_path, FakeProvider())
+    (tmp_path / "inbox" / "a.txt").write_text("a", encoding="utf-8")
+    (tmp_path / "inbox" / "b.txt").write_text("b", encoding="utf-8")
+    client.post("/api/scan")
+    a, b = sorted(client.get("/api/documents").json(), key=lambda d: d["filename"])
+    root = client.get("/api/fs").json()
+    assert root["specials"] == {"inbox": 2, "trash": 0} and root["folders"] == []
+    assert {f["doc"]["id"] for f in client.get("/api/fs", params={"path": "@inbox"}).json()["files"]} == {a["id"], b["id"]}
+    # новая папка (имя латиницей), перенос документа из «Входящих» = разложить в неё
+    folder = client.post("/api/fs/folder", json={"path": "", "name": "Школа Їжак"}).json()["path"]
+    assert folder == "Shkola Yizhak"
+    client.post("/api/fs/move", json={"to": folder, "doc_ids": [a["id"]]})
+    listing = client.get("/api/fs", params={"path": folder}).json()
+    assert listing["files"][0]["doc"]["id"] == a["id"]
+    # переименование папки обновляет путь документа
+    client.post("/api/fs/rename", json={"path": folder, "name": "School"})
+    assert "School" in Path(client.get(f"/api/documents/{a['id']}").json()["archive_path"]).parts
+    # перенос папки внутрь другой и запрет выхода за пределы архива
+    client.post("/api/fs/folder", json={"path": "", "name": "Docs"})
+    client.post("/api/fs/move", json={"to": "Docs", "paths": ["School"]})
+    assert client.get("/api/fs", params={"path": "Docs/School"}).json()["files"][0]["doc"]["id"] == a["id"]
+    assert client.get("/api/fs", params={"path": "../inbox"}).status_code == 400
+    assert client.post("/api/fs/move", json={"to": "Docs/School", "paths": ["Docs"]}).status_code == 400
+    assert client.delete("/api/fs/folder", params={"path": "Docs"}).status_code == 409
+    # файл, положенный в архив вручную, тоже виден
+    (tmp_path / "archive" / "manual.pdf").write_bytes(b"%PDF")
+    files = client.get("/api/fs").json()["files"]
+    assert files[0]["name"] == "manual.pdf" and files[0]["doc"] is None
+    assert client.get("/api/fs/file", params={"path": "manual.pdf"}).content == b"%PDF"
 
 
 def test_translit():

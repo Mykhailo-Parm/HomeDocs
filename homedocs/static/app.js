@@ -15,6 +15,7 @@ let lang = LANGS.includes(ls.get('hd_lang')) ? ls.get('hd_lang') : 'en';
 const S = {
   user: null, meta: null, people: [], docs: [], stats: null, cur: null, sel: null,
   checked: new Set(), sort: 'added_at', order: 'desc', preview: false, authSetup: false, tab: 'types',
+  view: ls.get('hd_view') === 'list' ? 'list' : 'desktop', cwd: ls.get('hd_cwd') || '', desk: null, deskSel: new Set(),
   f: { q: '', person: '', doc_type: '', doc_status: '', status: '', due: '' },
 };
 
@@ -50,12 +51,72 @@ async function api(url, opts = {}) {
 }
 const send = (method, data) => ({ method, body: JSON.stringify(data) });
 
-function toast(msg, kind = '') {
+function toast(msg, kind = '', action = null) {
   const el = document.createElement('div');
   el.className = 'toast ' + kind;
   el.textContent = msg;
+  if (action) {
+    const b = document.createElement('button');
+    b.className = 'small';
+    b.textContent = action.label;
+    b.addEventListener('click', () => { el.remove(); action.fn(); });
+    el.append(b);
+  }
   $('#toasts').append(el);
-  setTimeout(() => el.remove(), kind === 'bad' ? 9000 : 5000);
+  setTimeout(() => el.remove(), action ? 10000 : kind === 'bad' ? 9000 : 5000);
+}
+
+// Подтверждение окончательного удаления: нужно переписать 3 случайные цифры с экрана
+function confirmCode(message) {
+  const dlg = $('#codeDlg');
+  const code = String(100 + Math.floor(Math.random() * 900));
+  $('#codeMsg').textContent = message;
+  $('#codeVal').textContent = code;
+  $('#codeInput').value = '';
+  $('#codeOk').disabled = true;
+  $('#codeInput').oninput = () => { $('#codeOk').disabled = $('#codeInput').value.trim() !== code; };
+  dlg.showModal();
+  $('#codeInput').focus();
+  // ответ берём из нажатий, а не из события close: оно срабатывает не во всех браузерах
+  return new Promise(resolve => {
+    const finish = ok => {
+      $('#codeOk').onclick = $('#codeCancel').onclick = $('#codeInput').onkeydown = dlg.oncancel = null;
+      if (dlg.open) dlg.close();
+      resolve(ok && $('#codeInput').value.trim() === code);
+    };
+    $('#codeOk').onclick = e => { e.preventDefault(); finish(true); };
+    $('#codeCancel').onclick = e => { e.preventDefault(); finish(false); };
+    dlg.oncancel = e => { e.preventDefault(); finish(false); };  // Esc
+    $('#codeInput').onkeydown = e => {  // Enter подтверждает, только если код верный
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      if (!$('#codeOk').disabled) finish(true);
+    };
+  });
+}
+
+// ---------- корзина ----------
+
+async function trashDocs(ids) {
+  if (!ids.length) return;
+  await api('/api/documents/trash', send('POST', { ids }));
+  ids.forEach(id => { S.checked.delete(id); S.deskSel.delete('d:' + id); });
+  if (S.cur && ids.includes(S.cur.id)) closeDetail();
+  toast(t('moved_to_trash', { n: ids.length }), '', {
+    label: t('undo'),
+    fn: async () => { await api('/api/documents/restore', send('POST', { ids })).catch(fail); toast(t('restored'), 'ok'); refresh(); },
+  });
+  await refresh();
+}
+async function purgeDocs(ids, name) {
+  if (!ids.length) return;
+  const msg = ids.length === 1 && name ? t('confirm_purge', { name }) : t('confirm_purge_n', { n: ids.length });
+  if (!await confirmCode(msg)) return;
+  await api('/api/documents/trash', send('POST', { ids }));  // окончательно удалить можно только из корзины
+  const r = await api('/api/documents/purge', send('POST', { ids }));
+  if (S.cur && ids.includes(S.cur.id)) closeDetail();
+  toast(t('deleted_n', { n: r.done }), 'ok');
+  await refresh();
 }
 const fail = e => toast(t('error', { msg: e.message }), 'bad');
 
@@ -116,7 +177,7 @@ function setLang(l) {
   applyTheme(currentTheme());
   if (!S.user) { renderAuth(); return; }
   api('/api/me', send('PATCH', { lang: l })).then(u => { S.user = u; }).catch(fail);
-  renderFilters(); renderStats(); renderTable(); renderDetail();
+  renderFilters(); renderStats(); renderTable(); renderDetail(); renderView();
   $('#provider').textContent = S.meta ? t('ai_provider', { p: S.meta.provider }) : '';
   if ($('#settings').open) renderSettings();
 }
@@ -169,6 +230,7 @@ async function enter(user, pushPrefs) {
   $('#q').value = S.f.q || '';
   await Promise.all([loadMeta(), loadPeople()]);
   renderFilters();
+  renderView();
   await refresh();
 }
 
@@ -196,7 +258,177 @@ async function loadDocs() {
   renderTable();
 }
 async function loadStats() { S.stats = await api('/api/stats'); renderStats(); }
-async function refresh() { await Promise.all([loadDocs(), loadStats()]).catch(fail); }
+async function refresh() {
+  await Promise.all([loadDocs(), loadStats(), S.view === 'desktop' ? loadDesk() : null]).catch(fail);
+}
+
+// ---------- рабочий стол: настоящие папки архива на диске ----------
+
+function setView(v) {
+  S.view = v;
+  ls.set('hd_view', v);
+  renderView();
+  if (v === 'desktop') loadDesk().catch(fail);
+}
+function renderView() {
+  const desk = S.view === 'desktop';
+  $('#deskView').hidden = !desk;
+  $('#listView').hidden = desk;
+  $('#viewBtn').textContent = t(desk ? 'view_list' : 'view_desktop');
+  if (desk) renderDesk();
+}
+$('#viewBtn').addEventListener('click', () => setView(S.view === 'desktop' ? 'list' : 'desktop'));
+
+async function openFolder(path) {
+  S.cwd = path;
+  ls.set('hd_cwd', path);
+  S.deskSel.clear();
+  await loadDesk();
+}
+async function loadDesk() {
+  try {
+    S.desk = await api('/api/fs?' + new URLSearchParams({ path: S.cwd }));
+  } catch (e) {
+    if (!S.cwd) throw e;
+    S.cwd = ''; ls.set('hd_cwd', '');  // папку удалили или переименовали — назад на главную
+    S.desk = await api('/api/fs');
+  }
+  renderDesk();
+}
+
+const IMG = ['png', 'jpg', 'jpeg', 'webp'];
+function fileUrl(f) {
+  return f.doc ? `/api/documents/${f.doc.id}/file` : `/api/fs/file?${new URLSearchParams({ path: f.path })}`;
+}
+function tileKey(f) { return f.doc ? 'd:' + f.doc.id : 'p:' + f.path; }
+
+function renderDesk() {
+  if (!S.desk) return;
+  const cwd = S.cwd, special = cwd.startsWith('@');
+  // путь: Главная › Папка › Папка
+  const crumbs = [['', '🏠 ' + t('home')]];
+  if (cwd === '@inbox') crumbs.push(['@inbox', t('inbox')]);
+  else if (cwd === '@trash') crumbs.push(['@trash', t('trash')]);
+  else if (S.desk.path) S.desk.path.split('/').forEach((seg, i, a) => crumbs.push([a.slice(0, i + 1).join('/'), seg]));
+  $('#crumbs').innerHTML = crumbs.map(([p, label], i) =>
+    `${i ? '<span class="sep">›</span>' : ''}<button data-open="${esc(p)}" ${special && p ? '' : `data-drop="${esc(p)}"`}>${esc(label)}</button>`).join('');
+  $('#newFolderBtn').hidden = special;
+  $('#emptyTrashBtn').hidden = cwd !== '@trash' || !S.desk.files.length;
+
+  const tiles = [];
+  const sp = S.desk.specials;
+  if (sp) tiles.push(`<div class="tile" data-open="@inbox" data-drop-special="@inbox"><div class="ic">📥</div><div class="nm">${esc(t('inbox'))}</div>${sp.inbox ? `<span class="badge">${sp.inbox}</span>` : ''}</div>`);
+  S.desk.folders.forEach(f => tiles.push(`<div class="tile" data-open="${esc(f.path)}" data-drop="${esc(f.path)}" data-path="${esc(f.path)}" draggable="true">
+      <div class="ic">📁</div><div class="nm">${esc(f.name)}</div><div class="sub">${f.count}</div>
+      <div class="tile-act"><button data-tact="rename" title="${esc(t('rename'))}">✎</button>${f.count ? '' : `<button data-tact="rmdir" title="${esc(t('delete'))}">✕</button>`}</div></div>`));
+  S.desk.files.forEach(f => {
+    const d = f.doc, ext = (f.name.split('.').pop() || '').toLowerCase();
+    const icon = IMG.includes(ext) ? `<img loading="lazy" src="${fileUrl(f)}" alt="">` : (ext === 'pdf' ? '📄' : '📝');
+    const sub = d ? [d.doc_type ? esc(lname('type', d.doc_type)) : '', d.doc_date ? fmtDate(d.doc_date) : ''].filter(Boolean).join(' · ') : '';
+    const sel = S.deskSel.has(tileKey(f)) || (d && d.id === S.sel);
+    tiles.push(`<div class="tile ${sel ? 'sel' : ''}" data-key="${esc(tileKey(f))}" ${d ? `data-doc="${d.id}"` : ''} ${f.path ? `data-path="${esc(f.path)}"` : ''} ${special && cwd === '@trash' ? '' : 'draggable="true"'} title="${esc(f.name)}">
+      ${d && (d.status === 'analyzed' || d.status === 'error') ? `<span class="dot ${d.status}"></span>` : ''}
+      <div class="ic">${icon}</div><div class="nm">${esc(d ? d.title || d.filename : f.name)}</div><div class="sub">${sub}</div>
+      ${!d && f.path && !special ? `<div class="tile-act"><button data-tact="rename" title="${esc(t('rename'))}">✎</button></div>` : ''}</div>`);
+  });
+  if (sp) tiles.push(`<div class="tile" data-open="@trash" data-drop-special="@trash"><div class="ic">🗑</div><div class="nm">${esc(t('trash'))}</div>${sp.trash ? `<div class="sub">${sp.trash}</div>` : ''}</div>`);
+  const empty = cwd === '@inbox' ? 'empty_inbox' : cwd === '@trash' ? 'empty_trash_view' : 'empty_folder';
+  const hasContent = S.desk.folders.length || S.desk.files.length;
+  $('#desk').innerHTML = tiles.join('') + (hasContent ? '' : `<div class="empty">${esc(t(empty))}</div>`);
+}
+
+$('#desk').addEventListener('click', async e => {
+  const act = e.target.closest('[data-tact]');
+  const tile = e.target.closest('.tile');
+  if (!tile) { S.deskSel.clear(); renderDesk(); return; }
+  try {
+    if (act) {
+      e.stopPropagation();
+      const path = tile.dataset.path, name = path.split('/').pop();
+      if (act.dataset.tact === 'rename') {
+        const nn = (prompt(t('prompt_rename'), name) || '').trim();
+        if (nn && nn !== name) { await api('/api/fs/rename', send('POST', { path, name: nn })); await loadDesk(); }
+      } else if (act.dataset.tact === 'rmdir' && confirm(t('confirm_rmdir', { name }))) {
+        await api('/api/fs/folder?' + new URLSearchParams({ path }), { method: 'DELETE' });
+        await loadDesk();
+      }
+      return;
+    }
+    if (tile.dataset.open !== undefined) { await openFolder(tile.dataset.open); return; }
+    if (e.ctrlKey || e.metaKey || e.shiftKey) {
+      const k = tile.dataset.key;
+      S.deskSel.has(k) ? S.deskSel.delete(k) : S.deskSel.add(k);
+      renderDesk();
+      return;
+    }
+    S.deskSel.clear();
+    if (tile.dataset.doc) await show(+tile.dataset.doc);
+    else if (tile.dataset.path) window.open(fileUrl({ path: tile.dataset.path }), '_blank', 'noopener');
+    renderDesk();
+  } catch (err) { fail(err); }
+});
+$('#crumbs').addEventListener('click', e => {
+  const b = e.target.closest('[data-open]');
+  if (b) openFolder(b.dataset.open).catch(fail);
+});
+$('#newFolderBtn').addEventListener('click', async () => {
+  const name = (prompt(t('prompt_folder')) || '').trim();
+  if (!name) return;
+  try { await api('/api/fs/folder', send('POST', { path: S.cwd, name })); await loadDesk(); } catch (e) { fail(e); }
+});
+$('#emptyTrashBtn').addEventListener('click', async () => {
+  const n = S.desk.files.length;
+  if (!await confirmCode(t('confirm_empty_trash', { n }))) return;
+  try {
+    const r = await api('/api/trash/empty', { method: 'POST' });
+    toast(t('deleted_n', { n: r.done }), 'ok');
+    closeDetail(); await refresh();
+  } catch (e) { fail(e); }
+});
+
+// перетаскивание плиток на папки, путь и корзину
+const DRAG = 'application/x-homedocs';
+function dragItems(tile) {
+  const keys = S.deskSel.has(tile.dataset.key) ? [...S.deskSel] : [tile.dataset.key || 'p:' + tile.dataset.path];
+  return keys.map(k => k.startsWith('d:') ? { doc: +k.slice(2) } : { path: k.slice(2) });
+}
+document.addEventListener('dragstart', e => {
+  const tile = e.target.closest && e.target.closest('#desk .tile[draggable="true"]');
+  if (!tile) return;
+  e.dataTransfer.setData(DRAG, JSON.stringify(dragItems(tile)));
+  e.dataTransfer.effectAllowed = 'move';
+});
+function dropTarget(e) {
+  return e.target.closest && e.target.closest('#deskView [data-drop], #deskView [data-drop-special="@trash"]');
+}
+document.addEventListener('dragover', e => {
+  const tgt = dropTarget(e);
+  if (!tgt || ![...e.dataTransfer.types].includes(DRAG)) return;
+  e.preventDefault();
+  $$('.drop-on').forEach(x => x !== tgt && x.classList.remove('drop-on'));
+  tgt.classList.add('drop-on');
+});
+document.addEventListener('dragleave', e => { const tgt = dropTarget(e); if (tgt) tgt.classList.remove('drop-on'); });
+document.addEventListener('drop', async e => {
+  const tgt = dropTarget(e);
+  if (!tgt || ![...e.dataTransfer.types].includes(DRAG)) return;
+  e.preventDefault();
+  tgt.classList.remove('drop-on');
+  const items = JSON.parse(e.dataTransfer.getData(DRAG) || '[]');
+  S.deskSel.clear();
+  try {
+    if (tgt.dataset.dropSpecial === '@trash') {
+      await trashDocs(items.filter(i => i.doc).map(i => i.doc));
+      return;
+    }
+    const to = tgt.dataset.drop;
+    const paths = items.filter(i => i.path && !i.path.startsWith('@')).map(i => i.path).filter(p => p !== to);
+    const r = await api('/api/fs/move', send('POST', { to, paths, doc_ids: items.filter(i => i.doc).map(i => i.doc) }));
+    toast(t('moved_n', { n: r.moved }), 'ok');
+    await refresh();
+    if (S.sel) await show(S.sel);
+  } catch (err) { fail(err); }
+});
 function saveFilters() { ls.set('hd_filters', JSON.stringify(S.f)); }
 
 // ---------- фильтры и статистика ----------
@@ -218,7 +450,11 @@ Object.entries(filterSel).forEach(([sel, key]) => $(sel).addEventListener('chang
 let qTimer;
 $('#q').addEventListener('input', () => {
   clearTimeout(qTimer);
-  qTimer = setTimeout(() => { S.f.q = $('#q').value.trim(); saveFilters(); loadDocs().catch(fail); }, 250);
+  qTimer = setTimeout(() => {
+    S.f.q = $('#q').value.trim(); saveFilters();
+    if (S.f.q && S.view !== 'list') setView('list');  // поиск показывает результаты списком
+    loadDocs().catch(fail);
+  }, 250);
 });
 function resetFilters() {
   S.f = { q: '', person: '', doc_type: '', doc_status: '', status: '', due: '' };
@@ -232,12 +468,13 @@ const CHIPS = [
   { key: 'to_pay', label: 'stat_to_pay', f: { doc_status: 'to_pay' }, active: f => f.doc_status === 'to_pay' && !f.due, cls: 'warn' },
   { key: 'overdue', label: 'stat_overdue', f: { due: 'overdue' }, active: f => f.due === 'overdue', cls: 'bad' },
   { key: 'errors', label: 'stat_errors', f: { status: 'error' }, active: f => f.status === 'error', cls: 'bad' },
+  { key: 'trash', label: 'stat_trash', folder: '@trash', active: () => S.view === 'desktop' && S.cwd === '@trash' },
 ];
 function renderStats() {
   if (!S.stats) return;
   $('#stats').innerHTML = CHIPS.map((c, i) => {
     const n = S.stats[c.key];
-    if (n === 0 && ['overdue', 'errors'].includes(c.key)) return '';
+    if (n === 0 && ['overdue', 'errors', 'trash'].includes(c.key)) return '';
     let extra = '';
     if (c.key === 'to_pay' && S.stats.to_pay_sum) {
       extra = Object.entries(S.stats.to_pay_sum).map(([cur, sum]) => fmtAmount({ amount: sum, currency: cur })).join(' + ');
@@ -250,8 +487,15 @@ $('#stats').addEventListener('click', e => {
   const b = e.target.closest('[data-chip]');
   if (!b) return;
   const c = CHIPS[+b.dataset.chip];
-  Object.assign(S.f, { person: S.f.person, doc_type: S.f.doc_type, status: '', doc_status: '', due: '' }, c.f);
-  saveFilters(); renderFilters(); renderStats(); loadDocs().catch(fail);
+  if (c.folder) {  // корзина открывается на рабочем столе
+    S.view = 'desktop'; ls.set('hd_view', 'desktop');
+    renderView(); openFolder(c.folder).then(renderStats).catch(fail);
+    return;
+  }
+  Object.assign(S.f, { status: '', doc_status: '', due: '' }, c.f);
+  saveFilters(); renderFilters();
+  if (S.view !== 'list') setView('list');
+  renderStats(); loadDocs().catch(fail);
 });
 
 $('#exportBtn').addEventListener('click', () => {
@@ -270,7 +514,7 @@ function renderTable() {
   });
   const filtered = Object.values(S.f).some(Boolean);
   $('#rows').innerHTML = S.docs.map(d => `<tr class="row ${d.id === S.sel ? 'sel' : ''}" data-id="${d.id}">
-    <td class="ck"><input type="checkbox" data-check="${d.id}" ${S.checked.has(d.id) ? 'checked' : ''} ${d.status !== 'analyzed' ? 'disabled' : ''}></td>
+    <td class="ck"><input type="checkbox" data-check="${d.id}" ${S.checked.has(d.id) ? 'checked' : ''}></td>
     <td><div class="t">${esc(d.title || d.filename)}</div><div class="muted small">${esc(d.sender || '')}</div></td>
     <td>${esc(d.person || '—')}</td>
     <td>${d.doc_type ? `<span class="pill">${esc(lname('type', d.doc_type))}</span>` : ''}</td>
@@ -285,12 +529,20 @@ function renderTable() {
 function renderBulk() {
   $('#bulk').hidden = S.checked.size === 0;
   $('#bulkCount').textContent = t('selected', { n: S.checked.size });
-  const reviewable = S.docs.filter(d => d.status === 'analyzed');
-  $('#checkAll').checked = reviewable.length > 0 && reviewable.every(d => S.checked.has(d.id));
-  $('#checkAll').disabled = reviewable.length === 0;
+  $('#bulkApprove').hidden = !S.docs.some(d => S.checked.has(d.id) && d.status === 'analyzed');
+  $('#checkAll').checked = S.docs.length > 0 && S.docs.every(d => S.checked.has(d.id));
+  $('#checkAll').indeterminate = S.checked.size > 0 && !$('#checkAll').checked;
+  $('#checkAll').disabled = S.docs.length === 0;
 }
 
 $('#rows').addEventListener('click', e => {
+  if (e.target.closest('td.ck') && !e.target.closest('[data-check]')) {  // клик рядом с галочкой тоже её переключает
+    const box = e.target.closest('td.ck').querySelector('[data-check]');
+    box.checked = !box.checked;
+    box.checked ? S.checked.add(+box.dataset.check) : S.checked.delete(+box.dataset.check);
+    renderBulk();
+    return;
+  }
   const cb = e.target.closest('[data-check]');
   if (cb) {
     const id = +cb.dataset.check;
@@ -302,10 +554,11 @@ $('#rows').addEventListener('click', e => {
   if (tr) show(+tr.dataset.id);
 });
 $('#checkAll').addEventListener('change', () => {
-  S.docs.filter(d => d.status === 'analyzed').forEach(d => $('#checkAll').checked ? S.checked.add(d.id) : S.checked.delete(d.id));
+  S.docs.forEach(d => $('#checkAll').checked ? S.checked.add(d.id) : S.checked.delete(d.id));
   renderTable();
 });
 $('#bulkClear').addEventListener('click', () => { S.checked.clear(); renderTable(); });
+$('#bulkTrash').addEventListener('click', () => trashDocs([...S.checked]).catch(fail));
 $('#bulkApprove').addEventListener('click', async () => {
   $('#bulkApprove').disabled = true;
   try {
@@ -332,11 +585,13 @@ async function show(id) {
   } catch (e) { fail(e); return; }
   renderDetail();
   $$('#rows tr.row').forEach(tr => tr.classList.toggle('sel', +tr.dataset.id === id));
+  $$('#desk .tile[data-doc]').forEach(el => el.classList.toggle('sel', +el.dataset.doc === id || S.deskSel.has(el.dataset.key)));
 }
 function closeDetail() {
   S.cur = null; S.sel = null;
   renderDetail();
   $$('#rows tr.sel').forEach(tr => tr.classList.remove('sel'));
+  $$('#desk .tile.sel').forEach(el => { if (!S.deskSel.has(el.dataset.key)) el.classList.remove('sel'); });
 }
 
 function labelOptions(kind, cur, allowNone) {
@@ -381,7 +636,14 @@ function renderDetail() {
       <label class="full">${esc(t('f_tags'))}<input name="tags" value="${v((d.tags || []).join(', '))}"></label>
       <label class="full">${esc(t('f_summary'))}<textarea name="summary" rows="3">${v(d.summary)}</textarea></label>
     </form>
-    ${d.archive_path ? `<div class="muted small" style="margin-top:8px;word-break:break-all">${esc(t('archived_at', { path: d.archive_path }))}</div>` : ''}
+    ${d.archive_path && !d.trashed_at ? `<div class="muted small" style="margin-top:8px;word-break:break-all">${esc(t('archived_at', { path: d.archive_path }))}</div>` : ''}
+    ${d.trashed_at ? `
+    <div class="actions">
+      <button class="primary" data-act="restore">${esc(t('restore'))}</button>
+      <button data-act="preview">${esc(t(S.preview ? 'hide_preview' : 'preview'))}</button>
+      <button data-act="open">${esc(t('open_file'))}</button>
+      <button class="danger" data-act="purge">${esc(t('delete_forever'))}</button>
+    </div>` : `
     <div class="actions">
       <button class="primary" data-act="approve" ${d.status === 'approved' ? 'disabled' : ''}>${esc(t('approve'))}</button>
       <button data-act="save">${esc(t('save'))}</button>
@@ -389,8 +651,13 @@ function renderDetail() {
       <button data-act="open">${esc(t('open_file'))}</button>
       <button data-act="download">${esc(t('download'))}</button>
       <button data-act="reanalyze">${esc(t('reanalyze'))}</button>
-      <button class="danger" data-act="remove">${esc(t('remove'))}</button>
-    </div>`;
+      <button class="danger" data-act="trash">${esc(t('move_to_trash'))}</button>
+      <button class="danger" data-act="purge">${esc(t('delete_forever'))}</button>
+    </div>`}`;
+  if (d.trashed_at) {
+    $$('#dForm input, #dForm select, #dForm textarea, #dForm button').forEach(el => { el.disabled = true; });
+    $('#dForm').insertAdjacentHTML('beforebegin', `<div class="alert info">${esc(t('in_trash_since', { date: fmtDate(d.trashed_at.slice(0, 10)) }))}</div>`);
+  }
 }
 
 function formData() {
@@ -442,11 +709,14 @@ $('#detail').addEventListener('click', async e => {
       if (r.new_types.length || r.new_statuses.length) await loadMeta();
       announceNew(r);
       await refresh(); await show(id);
-    } else if (act === 'remove') {
-      if (!confirm(t('confirm_remove'))) return;
-      await api('/api/documents/' + id, { method: 'DELETE' });
-      toast(t('removed'));
-      closeDetail(); await refresh();
+    } else if (act === 'trash') {
+      await trashDocs([id]);
+    } else if (act === 'restore') {
+      await api('/api/documents/restore', send('POST', { ids: [id] }));
+      toast(t('restored'), 'ok');
+      await refresh(); await show(id);
+    } else if (act === 'purge') {
+      await purgeDocs([id], S.cur.title || S.cur.filename);
     }
   } catch (err) { fail(err); b.disabled = false; }
 });
@@ -484,6 +754,7 @@ async function scan() {
     const r = await api('/api/scan', { method: 'POST' });
     if (r.new_types.length || r.new_statuses.length) await loadMeta();
     toast(t('scan_result', r), r.errors ? 'bad' : 'ok');
+    if (r.in_trash) toast(t('scan_in_trash', { n: r.in_trash }));
     announceNew(r);
     await Promise.all([loadPeople(), refresh()]);
     renderFilters();
@@ -521,7 +792,7 @@ window.addEventListener('drop', e => {
 // ---------- клавиатура ----------
 
 document.addEventListener('keydown', e => {
-  if (!S.user || $('#settings').open) return;
+  if (!S.user || $('#settings').open || $('#codeDlg').open) return;
   const typing = e.target.matches('input, textarea, select');
   if (e.key === 'Escape') {
     if (typing) e.target.blur();
@@ -540,6 +811,16 @@ document.addEventListener('keydown', e => {
   }
   if (typing) return;
   if (e.key === '/') { e.preventDefault(); $('#q').focus(); return; }
+  if (e.key === 'Delete') {
+    // Del — в корзину (выделенное на рабочем столе, отмеченное в списке или открытый документ); Shift+Del — навсегда
+    const fromDesk = S.view === 'desktop' ? [...S.deskSel].filter(k => k.startsWith('d:')).map(k => +k.slice(2)) : [...S.checked];
+    const ids = fromDesk.length ? fromDesk : S.cur ? [S.cur.id] : [];
+    if (!ids.length) return;
+    e.preventDefault();
+    const inTrash = S.view === 'desktop' && S.cwd === '@trash';
+    (e.shiftKey || inTrash ? purgeDocs(ids, ids.length === 1 && S.cur ? S.cur.title || S.cur.filename : '') : trashDocs(ids)).catch(fail);
+    return;
+  }
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     if (!S.docs.length) return;
     e.preventDefault();
@@ -553,11 +834,12 @@ document.addEventListener('keydown', e => {
 
 const TABS = ['types', 'statuses', 'people', 'account', 'users'];
 $('#settingsBtn').addEventListener('click', () => { renderSettings(); $('#settings').showModal(); });
-$('#settingsClose').addEventListener('click', () => $('#settings').close());
-$('#settings').addEventListener('close', async () => {
+async function afterSettings() {
   await Promise.all([loadMeta(), loadPeople()]).catch(fail);
   renderFilters(); renderDetail(); refresh();
-});
+}
+$('#settingsClose').addEventListener('click', () => { $('#settings').close(); afterSettings(); });
+$('#settings').addEventListener('cancel', () => afterSettings());  // Esc
 $('#tabs').addEventListener('click', e => {
   const b = e.target.closest('[data-tab]');
   if (b) { S.tab = b.dataset.tab; renderSettings(); }

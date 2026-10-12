@@ -7,6 +7,7 @@ DEFAULTS = {
     "inbox_dir": "inbox",
     "archive_dir": "archive",
     "data_dir": "data",
+    "trash_dir": "trash",
     "ai": {
         "provider": "gemini",
         "gemini": {"model": "gemini-3.5-flash", "api_key": "",

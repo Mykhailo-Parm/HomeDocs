@@ -94,6 +94,9 @@ def migrate(conn):
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(documents)")}
     if "doc_status" not in cols:
         conn.execute("ALTER TABLE documents ADD COLUMN doc_status TEXT")
+    if "trashed_at" not in cols:  # корзина: когда удалён и куда перенесены файлы
+        conn.execute("ALTER TABLE documents ADD COLUMN trashed_at TEXT")
+        conn.execute("ALTER TABLE documents ADD COLUMN trash_info TEXT")
     for kind, rows in (("type", TYPES), ("status", STATUSES)):
         if not conn.execute("SELECT 1 FROM labels WHERE kind=?", (kind,)).fetchone():
             for i, (key, en, uk, de) in enumerate(rows):
@@ -111,7 +114,7 @@ def migrate(conn):
 
 def labels(conn, kind: str) -> list[dict]:
     return [{"key": r["key"], "names": json.loads(r["names"]), "origin": r["origin"],
-             "count": conn.execute(f"SELECT COUNT(*) FROM documents WHERE {'doc_type' if kind == 'type' else 'doc_status'}=?",
+             "count": conn.execute(f"SELECT COUNT(*) FROM documents WHERE trashed_at IS NULL AND {'doc_type' if kind == 'type' else 'doc_status'}=?",
                                    (r["key"],)).fetchone()[0]}
             for r in conn.execute("SELECT * FROM labels WHERE kind=? ORDER BY position, id", (kind,))]
 

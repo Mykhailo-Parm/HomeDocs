@@ -35,6 +35,7 @@
     <button id="uploadBtn" data-i18n="upload"></button>
     <input type="file" id="fileInput" multiple hidden accept=".pdf,.png,.jpg,.jpeg,.webp,.txt">
     <span class="spacer"></span>
+    <button id="viewBtn"></button>
     <select class="langSel" data-i18n-title="language"><option value="en">EN</option><option value="uk">UK</option><option value="de">DE</option></select>
     <button class="icon themeBtn"></button>
     <button class="icon" id="settingsBtn" data-i18n-title="settings">⚙</button>
@@ -43,7 +44,17 @@
   </header>
   <div class="stats" id="stats"></div>
   <main id="main">
-    <section>
+    <section id="deskView" hidden>
+      <div class="desk-bar">
+        <nav class="crumbs" id="crumbs"></nav>
+        <span class="spacer"></span>
+        <button id="newFolderBtn" data-i18n="new_folder"></button>
+        <button id="emptyTrashBtn" class="danger" data-i18n="empty_trash" hidden></button>
+      </div>
+      <div class="desk" id="desk"></div>
+      <div class="muted small desk-hint" data-i18n="desk_hint"></div>
+    </section>
+    <section id="listView">
       <div class="filters">
         <select id="fPerson"></select>
         <select id="fType"></select>
@@ -56,6 +67,7 @@
       <div class="bulk" id="bulk" hidden>
         <span id="bulkCount"></span>
         <button class="primary" id="bulkApprove" data-i18n="approve_selected"></button>
+        <button class="danger" id="bulkTrash" data-i18n="trash_selected"></button>
         <button id="bulkClear" data-i18n="clear"></button>
       </div>
       <div class="table-wrap">
@@ -89,6 +101,18 @@
     <button class="icon" id="settingsClose" data-i18n-title="close">✕</button>
   </div>
   <div class="dlg-body" id="settingsBody"></div>
+</dialog>
+
+<dialog id="codeDlg">
+  <div class="code-form">
+    <p id="codeMsg"></p>
+    <label class="muted small" for="codeInput" data-i18n="type_code"></label>
+    <div class="code-row"><div class="code" id="codeVal"></div><input id="codeInput" inputmode="numeric" maxlength="3" autocomplete="off"></div>
+    <div class="actions">
+      <button type="button" id="codeCancel" data-i18n="cancel"></button>
+      <button type="button" id="codeOk" class="danger-solid" disabled data-i18n="delete_forever"></button>
+    </div>
+  </div>
 </dialog>
 
 <div id="toasts" aria-live="polite"></div>
