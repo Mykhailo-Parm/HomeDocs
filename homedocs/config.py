@@ -1,0 +1,38 @@
+"""Загрузка настроек из config.toml (опционально) и переменных окружения."""
+import os
+import tomllib
+from pathlib import Path
+
+DEFAULTS = {
+    "inbox_dir": "inbox",
+    "archive_dir": "archive",
+    "data_dir": "data",
+    "doc_types": ["счёт", "информация", "договор", "налоги", "медицина", "страховка",
+                  "банк", "работа", "школа", "письмо", "другое"],
+    "ai": {
+        "provider": "gemini",
+        "gemini": {"model": "gemini-3.5-flash", "api_key": "",
+                   "fallback_models": ["gemini-flash-latest", "gemini-3.8-flash", "gemini-flash-lite-latest"]},
+        "claude": {"model": "claude-haiku-5-5", "api_key": ""},
+        "ollama": {"model": "qwen2.5:7b", "host": "http://localhost:11434"},
+    },
+}
+
+
+def _merge(base: dict, over: dict) -> dict:
+    out = dict(base)
+    for k, v in over.items():
+        out[k] = _merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else v
+    return out
+
+
+def load(path: str | None = None) -> dict:
+    path = path or os.environ.get("HOMEDOCS_CONFIG", "config.toml")
+    cfg = DEFAULTS
+    p = Path(path)
+    if p.exists():
+        cfg = _merge(DEFAULTS, tomllib.loads(p.read_text(encoding="utf-8")))
+    ai = cfg["ai"]
+    ai["gemini"]["api_key"] = ai["gemini"]["api_key"] or os.environ.get("GEMINI_API_KEY", "")
+    ai["claude"]["api_key"] = ai["claude"]["api_key"] or os.environ.get("ANTHROPIC_API_KEY", "")
+    return cfg
