@@ -1,0 +1,25 @@
+# Скопируй этот файл в config.toml и поправь под себя.
+
+# Папки (можно абсолютные пути, например "C:/Users/Mykhailo/Documents/HomeDocs/inbox")
+inbox_dir   = "inbox"      # сюда кладёшь новые сканы
+archive_dir = "archive"    # сюда копируются подтверждённые документы
+data_dir    = "data"       # база данных SQLite
+
+# Типы документов (ИИ выбирает из этого списка, можно менять)
+doc_types = ["счёт", "информация", "договор", "налоги", "медицина", "страховка", "банк", "работа", "школа", "письмо", "другое"]
+
+[ai]
+# Провайдер: "gemini" (бесплатный ключ), "ollama" (локально), "claude"
+provider = "gemini"
+
+[ai.gemini]
+model   = "gemini-2.5-flash"
+api_key = ""               # или переменная окружения GEMINI_API_KEY
+
+[ai.claude]
+model   = "claude-haiku-5-5"
+api_key = ""               # или переменная окружения ANTHROPIC_API_KEY
+
+[ai.ollama]
+model = "qwen2.5:7b"       # установи Ollama и выполни: ollama pull qwen2.5:7b
+host  = "http://localhost:11434"

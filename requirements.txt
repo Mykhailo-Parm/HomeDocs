@@ -1,0 +1,6 @@
+fastapi>=0.110
+uvicorn>=0.29
+pypdf>=4.0
+httpx>=0.27
+python-multipart>=0.0.9
+pytest>=8.0
