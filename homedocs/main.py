@@ -24,7 +24,10 @@ def create_app(cfg: dict | None = None, provider=None) -> FastAPI:
 
     def get_provider():
         if state["provider"] is None:
-            state["provider"] = make_provider(cfg)
+            try:
+                state["provider"] = make_provider(cfg)
+            except RuntimeError as e:
+                raise HTTPException(400, str(e))
         return state["provider"]
 
     def row(r):
