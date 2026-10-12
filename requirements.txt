@@ -6,4 +6,6 @@ python-multipart>=0.0.9
 pytesseract>=0.3.10
 pypdfium2>=4.20
 Pillow>=10.0
+opencv-python-headless>=4.10
+numpy>=1.26
 pytest>=8.0

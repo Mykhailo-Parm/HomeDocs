@@ -393,6 +393,68 @@ def test_thumbnails(tmp_path):
     assert client.get("/api/fs/thumb", params={"path": "../inbox/photo.jpg"}).status_code == 400
 
 
+def phone_photo(path):
+    """Синтетическое «фото с телефона»: лист A4 под углом на тёмном столе, с тенью и текстом."""
+    import cv2
+    import numpy as np
+    sheet = np.full((1400, 990, 3), 245, np.uint8)
+    for i in range(12):
+        cv2.putText(sheet, f"Rechnung Zeile {i}", (60, 120 + i * 95), cv2.FONT_HERSHEY_SIMPLEX, 1.6, (30, 30, 30), 3)
+    photo = np.full((2000, 1500, 3), (60, 45, 35), np.uint8)
+    # честная проекция: лист 210×297 мм наклонён в пространстве и снят камерой с фокусом 1600 px
+    ax, ay, az = np.radians([28, -12, 7])
+    rx = np.array([[1, 0, 0], [0, np.cos(ax), -np.sin(ax)], [0, np.sin(ax), np.cos(ax)]])
+    ry = np.array([[np.cos(ay), 0, np.sin(ay)], [0, 1, 0], [-np.sin(ay), 0, np.cos(ay)]])
+    rz = np.array([[np.cos(az), -np.sin(az), 0], [np.sin(az), np.cos(az), 0], [0, 0, 1]])
+    rot = rz @ ry @ rx
+    corners3d = np.array([[-105, -148.5, 0], [105, -148.5, 0], [105, 148.5, 0], [-105, 148.5, 0]]) @ rot.T + [0, 0, 420]
+    dst = np.float32([[750 + 1600 * x / z, 1000 + 1600 * y / z] for x, y, z in corners3d])
+    src = np.float32([[0, 0], [989, 0], [989, 1399], [0, 1399]])
+    cv2.warpPerspective(sheet, cv2.getPerspectiveTransform(src, dst), (1500, 2000), photo, borderMode=cv2.BORDER_TRANSPARENT)
+    shade = np.linspace(1.0, 0.7, 1500)[None, :, None]  # тень слева направо
+    cv2.imwrite(str(path), (photo * shade).astype(np.uint8))
+    return dst / [1500, 2000]
+
+
+def test_scanner_detects_and_flattens_sheet(tmp_path):
+    import numpy as np
+    from homedocs import scanner
+    expected = phone_photo(tmp_path / "photo.jpg")
+    img = scanner.load_photo(tmp_path / "photo.jpg")
+    corners, found = scanner.detect_corners(img)
+    assert found and np.abs(np.array(corners) - expected).max() < 0.02  # углы найдены точно
+    flat = scanner.warp(img, corners)
+    assert abs(flat.shape[0] / flat.shape[1] - 297 / 210) < 0.05  # восстановлены настоящие пропорции A4
+    doc = scanner.enhance(flat, "auto")
+    paper = doc[40:-40, 40:-40].reshape(-1, 3)
+    assert np.median(paper) >= 250  # фон стал белым, тень ушла
+    assert (scanner.enhance(flat, "bw") < 128).mean() > 0.01  # текст остался
+
+
+def test_scanner_api_to_pdf_in_inbox(tmp_path):
+    client, _ = make(tmp_path, FakeProvider())
+    phone_photo(tmp_path / "p1.jpg")
+    pages = []
+    for _ in range(2):
+        with open(tmp_path / "p1.jpg", "rb") as f:
+            r = client.post("/api/scanner/pages", files={"file": ("p1.jpg", f, "image/jpeg")}).json()
+        assert r["found"] and len(r["corners"]) == 4
+        pages.append(r["id"])
+    assert client.get(f"/api/scanner/pages/{pages[0]}/result").headers["content-type"] == "image/jpeg"
+    assert client.post(f"/api/scanner/pages/{pages[1]}/render", json={"corners": r["corners"], "filter": "bw", "rotate": 1}).json()["ok"]
+    assert client.post(f"/api/scanner/pages/{pages[1]}/render", json={"corners": [[0, 0]], "filter": "bw"}).status_code == 400
+    assert client.get("/api/scanner/pages/..%2F..%2Fsecret/original").status_code == 404
+    out = client.post("/api/scanner/finish", json={"pages": pages, "name": "Лист Їжак"}).json()
+    assert out["saved"] == "Lyst Yizhak.pdf" and out["doc"]["status"] == "analyzed"
+    import pypdfium2 as pdfium
+    pdf = pdfium.PdfDocument(str(tmp_path / "inbox" / "Lyst Yizhak.pdf"))
+    assert len(pdf) == 2 and pdf[1].get_width() > pdf[1].get_height()  # вторая страница повёрнута
+    pdf.close()
+    assert not list((tmp_path / "data" / "scanner").glob("*.jpg"))  # временные страницы удалены
+    with open(tmp_path / "p1.jpg", "rb") as f:
+        assert client.post("/api/scanner/pages", files={"file": ("x.jpg", b"not an image", "image/jpeg")}).status_code == 400
+
+
 def test_translit():
     assert to_latin("Михайло Парм") == "Mykhailo Parm"
     assert to_latin("Юлія Їжак, Яготин") == "Yuliia Yizhak, Yahotyn"

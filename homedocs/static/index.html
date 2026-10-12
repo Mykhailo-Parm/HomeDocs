@@ -6,6 +6,9 @@
 <meta name="referrer" content="no-referrer">
 <title>HomeDocs</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E📂%3C/text%3E%3C/svg%3E">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<meta name="theme-color" content="#2f6fed">
 <link rel="stylesheet" href="style.css">
 <script src="boot.js"></script>
 </head>
@@ -33,6 +36,7 @@
     <div class="search"><input id="q" type="search" data-i18n-ph="search_ph" autocomplete="off"></div>
     <button class="primary" id="scan" data-i18n="scan"></button>
     <button id="uploadBtn" data-i18n="upload"></button>
+    <a class="btn-link" href="/scan.html" data-i18n="scan_btn"></a>
     <input type="file" id="fileInput" multiple hidden accept=".pdf,.png,.jpg,.jpeg,.webp,.txt">
     <span class="spacer"></span>
     <button id="viewBtn"></button>

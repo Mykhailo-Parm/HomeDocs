@@ -3,7 +3,8 @@ import csv
 import io
 import json
 import shutil
-from datetime import date
+import uuid
+from datetime import date, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, UploadFile
@@ -15,6 +16,7 @@ from . import auth, config, db, pipeline
 from .ai import make_provider
 from .extract import MIME, SUPPORTED
 from .ocr import make_ocr
+from .scanner import Pages
 from .thumbs import thumbnail
 from .translit import safe_name, to_latin
 
@@ -637,6 +639,89 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
             dest.unlink(missing_ok=True)
             raise
         return {"saved": dest.name}
+
+    # ---------- сканер с телефона ----------
+
+    pages = Pages(Path(cfg["data_dir"]) / "scanner")
+
+    def page_or_404(fn, pid):
+        try:
+            return fn(pid)
+        except KeyError:
+            raise HTTPException(404, "Page not found")
+
+    @api.post("/scanner/pages")
+    def scanner_add(file: UploadFile):
+        """Фото страницы: сохраняем, ищем лист, сразу делаем «скан» с фильтром auto."""
+        tmp = pages.root / f"upload-{uuid.uuid4().hex}"
+        size = 0
+        try:
+            with open(tmp, "wb") as f:
+                while chunk := file.file.read(1 << 20):
+                    size += len(chunk)
+                    if size > MAX_UPLOAD:
+                        raise HTTPException(413, "File is larger than 50 MB")
+                    f.write(chunk)
+            try:
+                return pages.add(tmp)
+            except (OSError, ValueError):
+                raise HTTPException(400, "Not an image")
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    @api.get("/scanner/pages/{pid}/original")
+    def scanner_original(pid: str):
+        return FileResponse(page_or_404(pages.original, pid), media_type="image/jpeg")
+
+    @api.get("/scanner/pages/{pid}/result")
+    def scanner_result(pid: str):
+        return FileResponse(page_or_404(pages.result, pid), media_type="image/jpeg")
+
+    class RenderBody(BaseModel):
+        corners: list[list[float]]
+        filter: str = "auto"
+        rotate: int = 0
+
+    @api.post("/scanner/pages/{pid}/render")
+    def scanner_render(pid: str, body: RenderBody):
+        if len(body.corners) != 4 or any(len(c) != 2 or not all(-0.2 <= v <= 1.2 for v in c) for c in body.corners):
+            raise HTTPException(400, "Need 4 corners")
+        page_or_404(lambda p: pages.render(p, body.corners, body.filter, body.rotate), pid)
+        return {"ok": True}
+
+    @api.delete("/scanner/pages/{pid}")
+    def scanner_delete(pid: str):
+        page_or_404(pages.delete, pid)
+        return {"ok": True}
+
+    class FinishBody(BaseModel):
+        pages: list[str]
+        name: str = ""
+        analyze: bool = True
+
+    @api.post("/scanner/finish")
+    def scanner_finish(body: FinishBody):
+        """Страницы → один PDF во «Входящих», затем обычный разбор ИИ."""
+        if not body.pages:
+            raise HTTPException(400, "No pages")
+        inbox = Path(cfg["inbox_dir"]); inbox.mkdir(parents=True, exist_ok=True)
+        name = safe_name(body.name, 80, "") or f"Scan {datetime.now():%Y-%m-%d %H-%M}"
+        dest = pipeline.unique(inbox / f"{name}.pdf")
+        try:
+            pages.to_pdf(body.pages, dest)
+        except KeyError:
+            raise HTTPException(404, "Page not found")
+        for pid in body.pages:
+            pages.delete(pid)
+        out = {"saved": dest.name, "doc": None, "error": None}
+        if body.analyze:
+            try:
+                out["stats"] = pipeline.scan_inbox(conn, cfg, get_provider(), ocr)
+            except HTTPException as e:  # ИИ не настроен — файл всё равно во «Входящих»
+                out["error"] = e.detail
+            r = conn.execute("SELECT id FROM documents WHERE orig_path=?", (str(dest),)).fetchone()
+            out["doc"] = document(r["id"]) if r else None
+        return out
 
     @api.get("/export.csv")
     def export(q: str = "", person: str = "", doc_type: str = "", status: str = "", doc_status: str = "", due: str = "",

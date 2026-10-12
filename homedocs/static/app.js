@@ -220,6 +220,8 @@ $('#authForm').addEventListener('submit', async e => {
 async function enter(user, pushPrefs) {
   S.user = user;
   if (pushPrefs) S.user = await api('/api/me', send('PATCH', { lang, theme: currentTheme() }));
+  const next = new URLSearchParams(location.search).get('next');
+  if (next === '/scan.html') { location.href = next; return; }  // вход со страницы сканера — обратно туда
   lang = S.user.lang; ls.set('hd_lang', lang);
   applyTheme(S.user.theme);
   applyI18n();
