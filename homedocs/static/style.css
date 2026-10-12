@@ -117,6 +117,11 @@ dialog::backdrop { background: rgba(0,0,0,.4) }
 .addrow input { flex: 1 1 140px }
 .form-col { display: grid; gap: 8px; max-width: 360px }
 
+.date-range { display: inline-flex; align-items: center; gap: 4px; font-size: 12.5px; color: var(--muted) }
+.date-range input { padding: 5px 6px }
+td.folder { font-size: 12.5px; color: var(--muted); max-width: 220px; word-break: break-word }
+td.folder a { color: inherit }
+
 /* рабочий стол */
 .desk-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px }
 .crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; font-size: 14px }

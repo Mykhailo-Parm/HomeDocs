@@ -60,8 +60,11 @@
         <select id="fType"></select>
         <select id="fDocStatus"></select>
         <select id="fStatus"></select>
+        <label class="date-range"><span data-i18n="date_from"></span><input type="date" id="fFrom"></label>
+        <label class="date-range"><span data-i18n="date_to"></span><input type="date" id="fTo"></label>
         <button id="resetFilters" data-i18n="reset_filters"></button>
         <span class="spacer"></span>
+        <span class="muted small" id="docCount"></span>
         <button id="exportBtn" data-i18n="export"></button>
       </div>
       <div class="bulk" id="bulk" hidden>
@@ -75,13 +78,15 @@
           <thead><tr>
             <th class="ck"><input type="checkbox" id="checkAll" data-i18n-title="select_all"></th>
             <th data-s="title" data-i18n="col_doc"></th>
-            <th data-i18n="col_person"></th>
+            <th data-s="person" data-i18n="col_person"></th>
             <th data-s="doc_type" data-i18n="col_type"></th>
             <th data-s="doc_date" data-i18n="col_date"></th>
             <th data-s="amount" data-i18n="col_amount"></th>
             <th data-s="due_date" data-i18n="col_due"></th>
             <th data-s="doc_status" data-i18n="col_status"></th>
-            <th data-i18n="col_state"></th>
+            <th data-s="folder" data-i18n="col_folder"></th>
+            <th data-s="added_at" data-i18n="col_added"></th>
+            <th data-s="status" data-i18n="col_state"></th>
           </tr></thead>
           <tbody id="rows"></tbody>
         </table>

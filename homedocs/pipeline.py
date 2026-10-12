@@ -78,10 +78,18 @@ def _resolve_label(conn, kind: str, key, new, created: list):
     return "other" if kind == "type" else None
 
 
+def current_file(d) -> Path:
+    """Где файл документа сейчас: в архиве (после раскладки) или во «Входящих»."""
+    if d["archive_path"] and Path(d["archive_path"]).is_file():
+        return Path(d["archive_path"])
+    return Path(d["orig_path"])
+
+
 def analyze_document(conn, cfg, provider, doc_id: int, stats: dict | None = None) -> str | None:
     stats = stats if stats is not None else new_stats()
     doc = conn.execute("SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone()
-    path = Path(doc["orig_path"])
+    path = current_file(doc)
+    filed = path != Path(doc["orig_path"])  # уже разложен — остаётся в архиве
     try:
         from .ai import build_prompt
         people = [p["name"] for p in conn.execute("SELECT name FROM people ORDER BY name")]
@@ -95,31 +103,34 @@ def analyze_document(conn, cfg, provider, doc_id: int, stats: dict | None = None
         dtype = _resolve_label(conn, "type", r.get("doc_type"), r.get("new_doc_type"), stats["new_types"])
         dstatus = _resolve_label(conn, "status", r.get("doc_status"), r.get("new_doc_status"), stats["new_statuses"])
         conn.execute(
-            """UPDATE documents SET status='analyzed', error=NULL, title=?, doc_type=?, doc_status=?, summary=?, language=?,
+            """UPDATE documents SET status=?, error=NULL, title=?, doc_type=?, doc_status=?, summary=?, language=?,
                sender=?, doc_date=?, amount=?, currency=?, due_date=?, confidence=?, tags=?, person_id=?,
                suggested_name=? WHERE id=?""",
-            (r.get("title"), dtype, dstatus, r.get("summary"), r.get("language"), r.get("sender"),
+            ("approved" if filed else "analyzed", r.get("title"), dtype, dstatus, r.get("summary"), r.get("language"), r.get("sender"),
              r.get("doc_date"), r.get("amount"), r.get("currency"), r.get("due_date"),
              r.get("confidence"), json.dumps(r.get("tags") or [], ensure_ascii=False),
              person["id"] if person else None, suggest_name(r, path.suffix.lower()), doc_id))
         conn.commit()
         return None
     except Exception as e:  # документ остаётся в списке со статусом error
-        conn.execute("UPDATE documents SET status='error', error=? WHERE id=?", (str(e)[:500], doc_id))
+        if filed:  # разложенный документ не возвращается в «ошибки»: файл уже на месте
+            conn.execute("UPDATE documents SET error=? WHERE id=?", (str(e)[:500], doc_id))
+        else:
+            conn.execute("UPDATE documents SET status='error', error=? WHERE id=?", (str(e)[:500], doc_id))
         conn.commit()
         return str(e)
 
 
 def approve(conn, cfg, doc_id: int, folder: Path | None = None) -> str:
-    """Копирует файл в Архив/Человек/Тип/Имя (всё латиницей) или в выбранную папку архива.
-    Оригинал во «Входящих» остаётся нетронутым."""
+    """Переносит файл из «Входящих» в Архив/Человек/Тип/Имя (всё латиницей) или в выбранную папку архива.
+    Уже разложенный документ перекладывается внутри архива."""
     d = conn.execute("SELECT d.*, p.name AS person FROM documents d LEFT JOIN people p ON p.id=d.person_id WHERE d.id=?",
                      (doc_id,)).fetchone()
     if not d:
         raise KeyError(doc_id)
-    src = Path(d["orig_path"])
+    src = current_file(d)
     if not src.exists():
-        raise FileNotFoundError(f"Original file not found: {src}")
+        raise FileNotFoundError(f"File not found: {src}")
     if folder is None:
         type_name = db.label_name(conn, "type", d["doc_type"], "en") or d["doc_type"] or "Other"
         folder = Path(cfg["archive_dir"]) / safe_name(d["person"] or "", fallback="Unknown") / safe_name(type_name, fallback="Other")
@@ -128,12 +139,29 @@ def approve(conn, cfg, doc_id: int, folder: Path | None = None) -> str:
     base = d["suggested_name"] or src.name
     if Path(base).suffix.lower() in SUPPORTED:
         base = base[: -len(Path(base).suffix)]
-    dest = unique(folder / (safe_name(base, 120, "document") + ext))
-    shutil.copy2(src, dest)
+    dest = folder / (safe_name(base, 120, "document") + ext)
+    if dest.resolve() != src.resolve():
+        dest = unique(dest)
+        shutil.move(str(src), dest)
     conn.execute("UPDATE documents SET status='approved', archive_path=?, suggested_name=? WHERE id=?",
                  (str(dest), dest.name, doc_id))
     conn.commit()
     return str(dest)
+
+
+def clean_inbox(conn, cfg) -> int:
+    """Убирает из «Входящих» оригиналы уже разложенных документов (раньше раскладка копировала файл).
+    Удаляется только оригинал, у которого в архиве есть побайтово такая же копия."""
+    removed = 0
+    rows = conn.execute("SELECT * FROM documents WHERE status='approved' AND trashed_at IS NULL "
+                        "AND archive_path IS NOT NULL").fetchall()
+    for d in rows:
+        orig, arch = Path(d["orig_path"]), Path(d["archive_path"])
+        if orig.is_file() and arch.is_file() and orig.resolve() != arch.resolve() and inside(orig, cfg["inbox_dir"]) \
+                and sha256(orig) == d["sha256"] == sha256(arch):
+            orig.unlink()
+            removed += 1
+    return removed
 
 
 def repoint(conn, old: Path, new: Path):

@@ -16,7 +16,7 @@ const S = {
   user: null, meta: null, people: [], docs: [], stats: null, cur: null, sel: null,
   checked: new Set(), sort: 'added_at', order: 'desc', preview: false, authSetup: false, tab: 'types',
   view: ls.get('hd_view') === 'list' ? 'list' : 'desktop', cwd: ls.get('hd_cwd') || '', desk: null, deskSel: new Set(),
-  f: { q: '', person: '', doc_type: '', doc_status: '', status: '', due: '' },
+  f: { q: '', person: '', doc_type: '', doc_status: '', status: '', due: '', date_from: '', date_to: '' },
 };
 
 // ---------- общие помощники ----------
@@ -317,6 +317,7 @@ function renderDesk() {
 
   const tiles = [];
   const sp = S.desk.specials;
+  if (sp) tiles.push(`<div class="tile" data-allview="1"><div class="ic">📋</div><div class="nm">${esc(t('all_docs'))}</div><div class="sub">${S.stats ? S.stats.total : ''}</div></div>`);
   if (sp) tiles.push(`<div class="tile" data-open="@inbox" data-drop-special="@inbox"><div class="ic">📥</div><div class="nm">${esc(t('inbox'))}</div>${sp.inbox ? `<span class="badge">${sp.inbox}</span>` : ''}</div>`);
   S.desk.folders.forEach(f => tiles.push(`<div class="tile" data-open="${esc(f.path)}" data-drop="${esc(f.path)}" data-path="${esc(f.path)}" draggable="true">
       <div class="ic">📁</div><div class="nm">${esc(f.name)}</div><div class="sub">${f.count}</div>
@@ -354,6 +355,7 @@ $('#desk').addEventListener('click', async e => {
       }
       return;
     }
+    if (tile.dataset.allview) { setView('list'); return; }
     if (tile.dataset.open !== undefined) { await openFolder(tile.dataset.open); return; }
     if (e.ctrlKey || e.metaKey || e.shiftKey) {
       const k = tile.dataset.key;
@@ -442,6 +444,8 @@ function renderFilters() {
   $('#fDocStatus').innerHTML = options([...labelsOf('status').map(l => [l.key, lname('status', l.key)]), ['none', t('no_doc_status')]],
     S.f.doc_status, `<option value="">${esc(t('any_doc_status'))}</option>`);
   $('#fStatus').innerHTML = options(['analyzed', 'approved', 'error'].map(s => [s, t('st_' + s)]), S.f.status, `<option value="">${esc(t('any_state'))}</option>`);
+  $('#fFrom').value = S.f.date_from || '';
+  $('#fTo').value = S.f.date_to || '';
 }
 const filterSel = { '#fPerson': 'person', '#fType': 'doc_type', '#fDocStatus': 'doc_status', '#fStatus': 'status' };
 Object.entries(filterSel).forEach(([sel, key]) => $(sel).addEventListener('change', () => {
@@ -457,9 +461,12 @@ $('#q').addEventListener('input', () => {
   }, 250);
 });
 function resetFilters() {
-  S.f = { q: '', person: '', doc_type: '', doc_status: '', status: '', due: '' };
+  S.f = { q: '', person: '', doc_type: '', doc_status: '', status: '', due: '', date_from: '', date_to: '' };
   $('#q').value = ''; saveFilters(); renderFilters(); renderStats(); loadDocs().catch(fail);
 }
+[['#fFrom', 'date_from'], ['#fTo', 'date_to']].forEach(([sel, key]) => $(sel).addEventListener('change', () => {
+  S.f[key] = $(sel).value; saveFilters(); loadDocs().catch(fail);
+}));
 $('#resetFilters').addEventListener('click', resetFilters);
 
 const CHIPS = [
@@ -500,7 +507,7 @@ $('#stats').addEventListener('click', e => {
 
 $('#exportBtn').addEventListener('click', () => {
   const a = document.createElement('a');
-  a.href = '/api/export.csv?' + new URLSearchParams(S.f);
+  a.href = '/api/export.csv?' + new URLSearchParams({ ...S.f, sort: S.sort, order: S.order });
   a.download = 'homedocs.csv';
   document.body.append(a); a.click(); a.remove();
 });
@@ -522,8 +529,11 @@ function renderTable() {
     <td class="nowrap num">${fmtAmount(d)}</td>
     <td class="nowrap">${dueHtml(d)}</td>
     <td>${d.doc_status ? `<span class="pill ds-${esc(d.doc_status)}">${esc(lname('status', d.doc_status))}</span>` : ''}</td>
+    <td class="folder">${d.folder != null ? `<a href="#" data-folder="${esc(d.folder)}">📁 ${esc(d.folder || t('home'))}</a>` : `<span>📥 ${esc(t('inbox'))}</span>`}</td>
+    <td class="nowrap muted small">${fmtDate((d.added_at || '').slice(0, 10))}</td>
     <td class="nowrap st-${esc(d.status)}">${esc(t('st_' + d.status))}</td></tr>`).join('')
-    || `<tr><td colspan="9" class="empty">${esc(t(filtered ? 'empty_filtered' : 'empty'))}</td></tr>`;
+    || `<tr><td colspan="11" class="empty">${esc(t(filtered ? 'empty_filtered' : 'empty'))}</td></tr>`;
+  $('#docCount').textContent = t('docs_count', { n: S.docs.length });
   renderBulk();
 }
 function renderBulk() {
@@ -536,6 +546,13 @@ function renderBulk() {
 }
 
 $('#rows').addEventListener('click', e => {
+  const fl = e.target.closest('[data-folder]');
+  if (fl) {  // ссылка на папку открывает её на рабочем столе
+    e.preventDefault();
+    S.view = 'desktop'; ls.set('hd_view', 'desktop');
+    renderView(); openFolder(fl.dataset.folder).catch(fail);
+    return;
+  }
   if (e.target.closest('td.ck') && !e.target.closest('[data-check]')) {  // клик рядом с галочкой тоже её переключает
     const box = e.target.closest('td.ck').querySelector('[data-check]');
     box.checked = !box.checked;

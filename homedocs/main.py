@@ -30,6 +30,9 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';
 def create_app(cfg: dict | None = None, provider=None) -> FastAPI:
     cfg = cfg or config.load()
     conn = db.connect(cfg["data_dir"])
+    cleaned = pipeline.clean_inbox(conn, cfg)
+    if cleaned:
+        print(f"HomeDocs: removed {cleaned} already-archived original(s) from the inbox")
     state = {"provider": provider}
     limiter = auth.LoginLimiter()
     app = FastAPI(title="HomeDocs", docs_url=None, redoc_url=None, openapi_url=None)
@@ -195,9 +198,28 @@ def create_app(cfg: dict | None = None, provider=None) -> FastAPI:
     def meta():
         return {"provider": cfg["ai"]["provider"], "types": db.labels(conn, "type"), "statuses": db.labels(conn, "status")}
 
-    def query_docs(q="", person="", doc_type="", status="", doc_status="", due="", sort="added_at", order="desc"):
-        sort = sort if sort in {"added_at", "doc_date", "amount", "title", "due_date", "doc_type", "doc_status"} else "added_at"
+    SORTS = {"added_at": "d.added_at", "doc_date": "d.doc_date", "amount": "d.amount", "title": "COALESCE(d.title, d.filename)",
+             "due_date": "d.due_date", "doc_type": "d.doc_type", "doc_status": "d.doc_status", "person": "p.name",
+             "sender": "d.sender", "status": "d.status", "folder": "d.archive_path"}
+
+    def with_folder(d):
+        """Папка в архиве относительно его корня — для колонки «Папка»."""
+        d["folder"] = None
+        if d.get("archive_path"):
+            try:
+                d["folder"] = Path(d["archive_path"]).resolve().parent.relative_to(Path(cfg["archive_dir"]).resolve()).as_posix()
+            except ValueError:
+                pass
+        return d
+
+    def query_docs(q="", person="", doc_type="", status="", doc_status="", due="", sort="added_at", order="desc",
+                   date_from="", date_to=""):
+        col = SORTS.get(sort, "d.added_at")
         where, args = ["d.trashed_at IS NULL"], []
+        if date_from:
+            where.append("d.doc_date >= ?"); args.append(date_from)
+        if date_to:
+            where.append("d.doc_date <= ?"); args.append(date_to)
         if q:
             like = f"%{q}%"
             where.append("(d.title LIKE ? OR d.summary LIKE ? OR d.sender LIKE ? OR d.text LIKE ? OR d.filename LIKE ? OR d.tags LIKE ?)")
@@ -215,13 +237,14 @@ def create_app(cfg: dict | None = None, provider=None) -> FastAPI:
         if due == "overdue":
             where.append("d.due_date < ? AND d.doc_status IN ('to_pay', 'action')"); args.append(date.today().isoformat())
         sql = SELECT + (" WHERE " + " AND ".join(where) if where else "")
-        sql += f" ORDER BY d.{sort} IS NULL, d.{sort} {'ASC' if order == 'asc' else 'DESC'}, d.id DESC"
-        return [row(r) for r in conn.execute(sql, args)]
+        nocase = " COLLATE NOCASE" if sort in ("title", "person", "sender", "folder") else ""
+        sql += f" ORDER BY {col} IS NULL, {col}{nocase} {'ASC' if order == 'asc' else 'DESC'}, d.id DESC"
+        return [with_folder(row(r)) for r in conn.execute(sql, args)]
 
     @api.get("/documents")
     def documents(q: str = "", person: str = "", doc_type: str = "", status: str = "", doc_status: str = "",
-                  due: str = "", sort: str = "added_at", order: str = "desc"):
-        return query_docs(q, person, doc_type, status, doc_status, due, sort, order)
+                  due: str = "", sort: str = "added_at", order: str = "desc", date_from: str = "", date_to: str = ""):
+        return query_docs(q, person, doc_type, status, doc_status, due, sort, order, date_from, date_to)
 
     @api.get("/stats")
     def stats():
@@ -544,13 +567,14 @@ def create_app(cfg: dict | None = None, provider=None) -> FastAPI:
         return {"saved": dest.name}
 
     @api.get("/export.csv")
-    def export(q: str = "", person: str = "", doc_type: str = "", status: str = "", doc_status: str = "", due: str = ""):
+    def export(q: str = "", person: str = "", doc_type: str = "", status: str = "", doc_status: str = "", due: str = "",
+               sort: str = "added_at", order: str = "desc", date_from: str = "", date_to: str = ""):
         cols = ["id", "title", "person", "doc_type", "doc_status", "sender", "doc_date", "amount", "currency",
                 "due_date", "tags", "summary", "filename", "archive_path", "status", "added_at"]
         buf = io.StringIO()
         w = csv.writer(buf, delimiter=";")
         w.writerow(cols)
-        for d in query_docs(q, person, doc_type, status, doc_status, due):
+        for d in query_docs(q, person, doc_type, status, doc_status, due, sort, order, date_from, date_to):
             w.writerow([", ".join(d["tags"]) if c == "tags" else d.get(c) for c in cols])
         return Response("﻿" + buf.getvalue(), media_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition": 'attachment; filename="homedocs.csv"'})

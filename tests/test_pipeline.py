@@ -4,7 +4,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from homedocs import auth, config, db
+from homedocs import auth, config, db, pipeline
 from homedocs.ai import parse_json
 from homedocs.main import create_app
 from homedocs.translit import safe_name, to_latin
@@ -41,7 +41,7 @@ def make(tmp_path, provider, login=True):
     return client, cfg
 
 
-def test_scan_creates_person_and_archives_by_copy_with_latin_names(tmp_path):
+def test_scan_creates_person_and_moves_to_archive_with_latin_names(tmp_path):
     client, cfg = make(tmp_path, FakeProvider())
     src = tmp_path / "inbox" / "scan1.txt"
     src.write_text("Рахунок №1", encoding="utf-8")
@@ -53,8 +53,12 @@ def test_scan_creates_person_and_archives_by_copy_with_latin_names(tmp_path):
     assert doc["person"] == "Михайло Парм" and doc["doc_type"] == "invoice" and doc["doc_status"] == "to_pay"
     assert doc["suggested_name"] == "2026-09-30_Kyivstar_Rakhunok za internet.txt"
     dest = client.post(f"/api/documents/{doc['id']}/approve").json()["archive_path"]
-    assert Path(dest).exists() and src.exists()  # оригинал на месте
+    assert Path(dest).read_text(encoding="utf-8") == "Рахунок №1" and not src.exists()  # перенесён, не скопирован
     assert Path(dest).relative_to(tmp_path / "archive").as_posix() == "Mykhailo Parm/Invoice/2026-09-30_Kyivstar_Rakhunok za internet.txt"
+    # повторный разбор ИИ читает файл из архива и не возвращает документ на проверку
+    r = client.post(f"/api/documents/{doc['id']}/reanalyze").json()
+    assert r["status"] == "approved" and r["archive_path"] == dest
+    assert client.get("/api/documents").json()[0]["folder"] == "Mykhailo Parm/Invoice"
 
 
 def test_known_person_not_duplicated_and_filters(tmp_path):
@@ -215,7 +219,7 @@ def test_trash_restore_and_purge(tmp_path):
     assert client.post("/api/scan").json()["in_trash"] == 1
     src.unlink()
     client.post("/api/documents/restore", json={"ids": [doc["id"]]})
-    assert src.exists() and archived.exists() and len(client.get("/api/documents").json()) == 1
+    assert archived.exists() and not src.exists() and len(client.get("/api/documents").json()) == 1
     # окончательно удалить можно только из корзины
     client.post("/api/documents/purge", json={"ids": [doc["id"]]})
     assert archived.exists()
@@ -256,6 +260,38 @@ def test_desktop_folders(tmp_path):
     files = client.get("/api/fs").json()["files"]
     assert files[0]["name"] == "manual.pdf" and files[0]["doc"] is None
     assert client.get("/api/fs/file", params={"path": "manual.pdf"}).content == b"%PDF"
+
+
+def test_clean_inbox_removes_only_identical_archived_originals(tmp_path):
+    client, cfg = make(tmp_path, FakeProvider())
+    conn = client.app.state.conn
+    for name in ("same.txt", "changed.txt"):
+        (tmp_path / "inbox" / name).write_text(name, encoding="utf-8")
+    client.post("/api/scan")
+    # как в старой версии: файл скопирован в архив, оригинал остался во «Входящих»
+    for d in client.get("/api/documents").json():
+        arch = tmp_path / "archive" / d["filename"]
+        arch.parent.mkdir(exist_ok=True)
+        arch.write_text("edited" if d["filename"] == "changed.txt" else d["filename"], encoding="utf-8")
+        conn.execute("UPDATE documents SET status='approved', archive_path=? WHERE id=?", (str(arch), d["id"]))
+    conn.commit()
+    assert pipeline.clean_inbox(conn, cfg) == 1
+    assert not (tmp_path / "inbox" / "same.txt").exists() and (tmp_path / "inbox" / "changed.txt").exists()
+
+
+def test_all_documents_sort_and_date_filter(tmp_path):
+    prov = FakeProvider()
+    client, _ = make(tmp_path, prov)
+    for name, day, who in (("a.txt", "2026-01-05", "Борис"), ("b.txt", "2026-03-10", "Анна"), ("c.txt", "2025-12-31", "Віра")):
+        prov.extra = {"doc_date": day}
+        prov.recipient = who
+        (tmp_path / "inbox" / name).write_text(name, encoding="utf-8")
+        client.post("/api/scan")
+    names = lambda **p: [d["filename"] for d in client.get("/api/documents", params=p).json()]
+    assert names(sort="doc_date", order="asc") == ["c.txt", "a.txt", "b.txt"]
+    assert names(sort="person", order="asc") == ["b.txt", "a.txt", "c.txt"]
+    assert names(date_from="2026-01-01", date_to="2026-02-01") == ["a.txt"]
+    assert client.get("/api/documents").json()[0]["folder"] is None  # ещё во «Входящих»
 
 
 def test_translit():
