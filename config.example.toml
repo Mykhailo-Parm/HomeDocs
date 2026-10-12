@@ -13,7 +13,7 @@ doc_types = ["счёт", "информация", "договор", "налоги
 provider = "gemini"
 
 [ai.gemini]
-model   = "gemini-2.5-flash"
+model   = "gemini-3.5-flash"
 api_key = ""               # или переменная окружения GEMINI_API_KEY
 
 [ai.claude]

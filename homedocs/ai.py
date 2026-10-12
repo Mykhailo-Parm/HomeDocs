@@ -2,6 +2,7 @@
 import base64
 import json
 import re
+import time
 
 import httpx
 
@@ -68,12 +69,17 @@ class Gemini(Provider):
             parts.append({"text": "Текст документа:\n" + text})
         elif file_bytes:
             parts.append({"inline_data": {"mime_type": mime, "data": base64.b64encode(file_bytes).decode()}})
-        r = httpx.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent",
-            headers={"x-goog-api-key": self.key},
-            json={"contents": [{"parts": parts}],
-                  "generationConfig": {"responseMimeType": "application/json", "temperature": 0}},
-            timeout=120)
+        # 429/500/503 у Gemini часто временные ("high demand"): повторяем с паузой
+        for attempt in range(4):
+            r = httpx.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent",
+                headers={"x-goog-api-key": self.key},
+                json={"contents": [{"parts": parts}],
+                      "generationConfig": {"responseMimeType": "application/json", "temperature": 0}},
+                timeout=120)
+            if r.status_code not in (429, 500, 503) or attempt == 3:
+                break
+            time.sleep(2 ** (attempt + 1))
         r.raise_for_status()
         return parse_json(r.json()["candidates"][0]["content"]["parts"][0]["text"])
 
