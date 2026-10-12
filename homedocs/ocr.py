@@ -13,8 +13,40 @@ WIN_PATHS = [r"C:\Program Files\Tesseract-OCR\tesseract.exe",
              os.path.expandvars(r"%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe")]
 
 
+def _from_registry() -> list[str]:
+    """Windows: папка установки Tesseract из списка установленных программ (если ставили не в стандартное место)."""
+    try:
+        import winreg
+    except ImportError:
+        return []
+    found = []
+    for hive, key in ((winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+                      (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+                      (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall")):
+        try:
+            with winreg.OpenKey(hive, key) as root:
+                for i in range(winreg.QueryInfoKey(root)[0]):
+                    try:
+                        with winreg.OpenKey(root, winreg.EnumKey(root, i)) as app:
+                            if "tesseract" not in str(winreg.QueryValueEx(app, "DisplayName")[0]).lower():
+                                continue
+                            for value in ("InstallLocation", "UninstallString"):
+                                try:
+                                    p = str(winreg.QueryValueEx(app, value)[0]).strip('"')
+                                except OSError:
+                                    continue
+                                if p:
+                                    base = Path(p) if value == "InstallLocation" else Path(p).parent
+                                    found.append(str(base / "tesseract.exe"))
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return found
+
+
 def find_tesseract(cmd: str = "") -> str | None:
-    for c in [cmd, shutil.which("tesseract") or "", *WIN_PATHS]:
+    for c in [cmd, shutil.which("tesseract") or "", *WIN_PATHS, *_from_registry()]:
         if c and Path(c).is_file():
             return c
     return None
