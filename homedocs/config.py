@@ -7,8 +7,6 @@ DEFAULTS = {
     "inbox_dir": "inbox",
     "archive_dir": "archive",
     "data_dir": "data",
-    "doc_types": ["счёт", "информация", "договор", "налоги", "медицина", "страховка",
-                  "банк", "работа", "школа", "письмо", "другое"],
     "ai": {
         "provider": "gemini",
         "gemini": {"model": "gemini-3.5-flash", "api_key": "",
