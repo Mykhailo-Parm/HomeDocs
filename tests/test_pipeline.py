@@ -32,7 +32,7 @@ def make(tmp_path, provider):
 def test_scan_creates_person_and_archives_by_copy(tmp_path):
     client, cfg = make(tmp_path, FakeProvider())
     src = tmp_path / "inbox" / "scan1.txt"
-    src.write_text("Рахунок №1")
+    src.write_text("Рахунок №1", encoding="utf-8")
     r = client.post("/api/scan").json()
     assert r["added"] == 1 and r["new_people"] == ["Михайло Парм"]
     # повторный скан: дубликат, не добавляется
@@ -46,10 +46,10 @@ def test_scan_creates_person_and_archives_by_copy(tmp_path):
 def test_known_person_not_duplicated_and_filters(tmp_path):
     prov = FakeProvider()
     client, _ = make(tmp_path, prov)
-    (tmp_path / "inbox" / "a.txt").write_text("a")
+    (tmp_path / "inbox" / "a.txt").write_text("a", encoding="utf-8")
     client.post("/api/scan")
     prov.recipient = "Парм Михайло"  # другой порядок слов
-    (tmp_path / "inbox" / "b.txt").write_text("b")
+    (tmp_path / "inbox" / "b.txt").write_text("b", encoding="utf-8")
     r = client.post("/api/scan").json()
     assert r["new_people"] == [] and len(client.get("/api/people").json()) == 1
     assert "Михайло Парм" in prov.seen_people[-1]
@@ -62,7 +62,7 @@ def test_provider_error_marks_document(tmp_path):
         supports_files = False
         def analyze(self, *a): raise RuntimeError("boom")
     client, _ = make(tmp_path, Bad())
-    (tmp_path / "inbox" / "a.txt").write_text("a")
+    (tmp_path / "inbox" / "a.txt").write_text("a", encoding="utf-8")
     assert client.post("/api/scan").json()["errors"] == 1
     assert client.get("/api/documents").json()[0]["status"] == "error"
 
