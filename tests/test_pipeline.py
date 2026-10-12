@@ -455,6 +455,17 @@ def test_scanner_api_to_pdf_in_inbox(tmp_path):
         assert client.post("/api/scanner/pages", files={"file": ("x.jpg", b"not an image", "image/jpeg")}).status_code == 400
 
 
+def test_only_home_networks_allowed(tmp_path):
+    client, _ = make(tmp_path, FakeProvider())
+    app = client.app
+    home = TestClient(app, headers=HDR, client=("192.168.178.40", 50000))
+    assert home.get("/api/auth/state").status_code == 200
+    for outsider in ("26.189.215.180", "8.8.8.8"):  # Radmin VPN, интернет
+        r = TestClient(app, headers=HDR, client=(outsider, 50000)).get("/api/auth/state")
+        assert r.status_code == 403
+    assert TestClient(app, headers=HDR, client=("100.101.102.103", 1)).get("/").status_code == 200  # Tailscale
+
+
 def test_translit():
     assert to_latin("Михайло Парм") == "Mykhailo Parm"
     assert to_latin("Юлія Їжак, Яготин") == "Yuliia Yizhak, Yahotyn"

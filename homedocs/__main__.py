@@ -17,12 +17,20 @@ def log_to_file():
     sys.stdout = sys.stderr = open(path, "a", encoding="utf-8", buffering=1)
 
 
+def arg(name: str, default: str) -> str:
+    """--host 0.0.0.0 / --port 8000 из командной строки (удобно для автозапуска), иначе переменная окружения."""
+    if name in sys.argv[:-1]:
+        return sys.argv[sys.argv.index(name) + 1]
+    return default
+
+
 def supervise():
     """Сторож для автозапуска: держит сервер запущенным и поднимает его снова после падения."""
     delay = 5
+    passthrough = [a for a in sys.argv[1:] if a != "--supervise"]
     while True:
         started = time.monotonic()
-        code = subprocess.call([sys.executable, "-m", "homedocs"])
+        code = subprocess.call([sys.executable, "-m", "homedocs", *passthrough])
         if time.monotonic() - started > 60:  # проработал нормально — следующий перезапуск снова быстрый
             delay = 5
         print(f"{datetime.now():%Y-%m-%d %H:%M:%S} HomeDocs exited with code {code}, restart in {delay}s", flush=True)
@@ -34,9 +42,9 @@ def serve():
     import uvicorn
 
     from .main import create_app
-    # По умолчанию доступно только с этого компьютера. На сервере: HOMEDOCS_HOST=0.0.0.0
-    uvicorn.run(create_app(), host=os.environ.get("HOMEDOCS_HOST", "127.0.0.1"),
-                port=int(os.environ.get("HOMEDOCS_PORT", "8000")))
+    # По умолчанию доступно только с этого компьютера. Для телефона в домашней сети: --host 0.0.0.0
+    uvicorn.run(create_app(), host=arg("--host", os.environ.get("HOMEDOCS_HOST", "127.0.0.1")),
+                port=int(arg("--port", os.environ.get("HOMEDOCS_PORT", "8000"))))
 
 
 if __name__ == "__main__":

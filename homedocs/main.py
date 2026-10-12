@@ -1,6 +1,7 @@
 """Веб-приложение HomeDocs (FastAPI). Запуск: python -m homedocs"""
 import csv
 import io
+import ipaddress
 import json
 import shutil
 import uuid
@@ -43,8 +44,24 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
     app = FastAPI(title="HomeDocs", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.conn = conn
 
+    allowed = [ipaddress.ip_network(n, strict=False) for n in cfg.get("allow_from") or []]
+
+    def client_allowed(host: str) -> bool:
+        if not allowed or host in ("testclient", "localhost"):
+            return True
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            return False
+        if ip.version == 6 and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        return any(ip in n for n in allowed if n.version == ip.version)
+
     @app.middleware("http")
     async def security(request: Request, call_next):
+        # только свои сети: например, чужие из Radmin/игровых VPN или интернета не пройдут, даже если порт открыт
+        if not client_allowed(request.client.host if request.client else ""):
+            return JSONResponse({"detail": "Access from this network is not allowed"}, status_code=403)
         # защита от CSRF: изменяющие запросы к API должны прийти из нашего интерфейса
         if request.url.path.startswith("/api/") and request.method not in ("GET", "HEAD", "OPTIONS") \
                 and request.headers.get("x-homedocs") != "1":
