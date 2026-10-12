@@ -1,10 +1,45 @@
 import os
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
 
-import uvicorn
+LOG_LIMIT = 5 * 1024 * 1024
 
-from .main import create_app
 
-if __name__ == "__main__":
+def log_to_file():
+    """Запуск без консоли (pythonw, автозапуск Windows): вывод пишется в data/homedocs.log."""
+    path = Path(os.environ.get("HOMEDOCS_LOG", "data/homedocs.log"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.stat().st_size > LOG_LIMIT:  # старый лог — в .old, чтобы файл не рос бесконечно
+        path.replace(path.with_suffix(".log.old"))
+    sys.stdout = sys.stderr = open(path, "a", encoding="utf-8", buffering=1)
+
+
+def supervise():
+    """Сторож для автозапуска: держит сервер запущенным и поднимает его снова после падения."""
+    delay = 5
+    while True:
+        started = time.monotonic()
+        code = subprocess.call([sys.executable, "-m", "homedocs"])
+        if time.monotonic() - started > 60:  # проработал нормально — следующий перезапуск снова быстрый
+            delay = 5
+        print(f"{datetime.now():%Y-%m-%d %H:%M:%S} HomeDocs exited with code {code}, restart in {delay}s", flush=True)
+        time.sleep(delay)
+        delay = min(delay * 2, 300)  # если падает сразу при старте — не крутимся в цикле
+
+
+def serve():
+    import uvicorn
+
+    from .main import create_app
     # По умолчанию доступно только с этого компьютера. На сервере: HOMEDOCS_HOST=0.0.0.0
     uvicorn.run(create_app(), host=os.environ.get("HOMEDOCS_HOST", "127.0.0.1"),
                 port=int(os.environ.get("HOMEDOCS_PORT", "8000")))
+
+
+if __name__ == "__main__":
+    if sys.stdout is None or os.environ.get("HOMEDOCS_LOG"):
+        log_to_file()
+    supervise() if "--supervise" in sys.argv else serve()
