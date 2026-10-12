@@ -13,7 +13,7 @@ Read the document and return ONLY a JSON object with these fields:
 - "new_doc_type": null if an existing type clearly fits. If none does (never force a document into an unrelated type, e.g. a car registration is not "housing"), set "doc_type" to null and give a new general type (1-2 words, reusable for similar documents) as {{"en": "...", "uk": "...", "de": "..."}}
 - "doc_status": the key of the status that fits, or null if the document needs no action: {statuses}
 - "new_doc_status": null. ONLY if the document clearly needs a status none of the existing ones expresses, a new one as {{"en": "...", "uk": "...", "de": "..."}}
-- "summary": 1-2 sentences about what the document is, written in {lang}
+- "summary": 1-2 sentences about what the document is, written in the document's own language
 - "language": language code of the document (uk, en, de, ...)
 - "sender": sender or organisation (or null)
 - "recipient": the person the document is addressed to, full name as written in the document (or null)
@@ -29,13 +29,9 @@ If the recipient is one of the known people (even if the name is written differe
 If the recipient matches nobody in the list, return their name as written in the document; they will be added as a new person.
 Prefer existing types and statuses; create new ones rarely. Do not invent anything: if something is not in the document, use null."""
 
-LANGS = {"en": "English", "uk": "Ukrainian", "de": "German"}
-
-
-def build_prompt(people: list[str], types: list[dict], statuses: list[dict], lang: str = "en") -> str:
+def build_prompt(people: list[str], types: list[dict], statuses: list[dict]) -> str:
     fmt = lambda ls: ", ".join(f'{l["key"]} ({l["names"].get("en", l["key"])})' for l in ls)
-    return PROMPT.format(types=fmt(types), statuses=fmt(statuses), lang=LANGS.get(lang, "English"),
-                         people=", ".join(people) or "nobody yet")
+    return PROMPT.format(types=fmt(types), statuses=fmt(statuses), people=", ".join(people) or "nobody yet")
 
 
 def parse_json(raw: str) -> dict:

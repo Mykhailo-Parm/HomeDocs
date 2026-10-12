@@ -310,9 +310,9 @@ def create_app(cfg: dict | None = None, provider=None) -> FastAPI:
         return {"approved": len(done), "failed": failed}
 
     @api.post("/documents/{doc_id}/reanalyze")
-    def reanalyze(doc_id: int, provider=Depends(get_provider), u=Depends(current_user)):
+    def reanalyze(doc_id: int, provider=Depends(get_provider)):
         stats = pipeline.new_stats()
-        err = pipeline.analyze_document(conn, cfg, provider, doc_id, stats, u["lang"])
+        err = pipeline.analyze_document(conn, cfg, provider, doc_id, stats)
         if err:
             raise HTTPException(502, err)
         return {**document(doc_id), "new_types": stats["new_types"], "new_statuses": stats["new_statuses"]}
@@ -340,8 +340,8 @@ def create_app(cfg: dict | None = None, provider=None) -> FastAPI:
         raise HTTPException(410, "File not found")
 
     @api.post("/scan")
-    def scan(provider=Depends(get_provider), u=Depends(current_user)):
-        return pipeline.scan_inbox(conn, cfg, provider, u["lang"])
+    def scan(provider=Depends(get_provider)):
+        return pipeline.scan_inbox(conn, cfg, provider)
 
     @api.post("/upload")
     def upload(file: UploadFile):

@@ -66,6 +66,7 @@ def test_known_person_not_duplicated_and_filters(tmp_path):
     r = client.post("/api/scan").json()
     assert r["new_people"] == [] and len(client.get("/api/people").json()) == 1
     assert "Михайло Парм" in prov.seen_people[-1]
+    assert "summary\": 1-2 sentences about what the document is, written in the document's own language" in prov.seen_people[-1]
     assert len(client.get("/api/documents", params={"q": "b"}).json()) == 1
     assert len(client.get("/api/documents", params={"person": "Nobody"}).json()) == 0
     assert len(client.get("/api/documents", params={"doc_status": "to_pay"}).json()) == 2

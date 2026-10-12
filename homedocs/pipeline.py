@@ -18,7 +18,7 @@ def new_stats() -> dict:
     return {"found": 0, "added": 0, "duplicates": 0, "errors": 0, "new_people": [], "new_types": [], "new_statuses": []}
 
 
-def scan_inbox(conn, cfg, provider, lang: str = "en") -> dict:
+def scan_inbox(conn, cfg, provider) -> dict:
     """Находит новые файлы во «Входящих» и анализирует. Файлы не изменяет."""
     inbox = Path(cfg["inbox_dir"])
     inbox.mkdir(parents=True, exist_ok=True)
@@ -30,7 +30,7 @@ def scan_inbox(conn, cfg, provider, lang: str = "en") -> dict:
         digest = sha256(path)
         known = conn.execute("SELECT id, status FROM documents WHERE sha256=?", (digest,)).fetchone()
         if known and known["status"] == "error":  # прошлый разбор не удался — пробуем снова
-            err = analyze_document(conn, cfg, provider, known["id"], stats, lang)
+            err = analyze_document(conn, cfg, provider, known["id"], stats)
             stats["errors" if err else "added"] += 1
             continue
         if known:
@@ -40,7 +40,7 @@ def scan_inbox(conn, cfg, provider, lang: str = "en") -> dict:
         cur = conn.execute("INSERT INTO documents(sha256, orig_path, filename, text) VALUES (?,?,?,?)",
                            (digest, str(path), path.name, text))
         conn.commit()
-        err = analyze_document(conn, cfg, provider, cur.lastrowid, stats, lang)
+        err = analyze_document(conn, cfg, provider, cur.lastrowid, stats)
         stats["errors" if err else "added"] += 1
     return stats
 
@@ -60,14 +60,14 @@ def _resolve_label(conn, kind: str, key, new, created: list):
     return "other" if kind == "type" else None
 
 
-def analyze_document(conn, cfg, provider, doc_id: int, stats: dict | None = None, lang: str = "en") -> str | None:
+def analyze_document(conn, cfg, provider, doc_id: int, stats: dict | None = None) -> str | None:
     stats = stats if stats is not None else new_stats()
     doc = conn.execute("SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone()
     path = Path(doc["orig_path"])
     try:
         from .ai import build_prompt
         people = [p["name"] for p in conn.execute("SELECT name FROM people ORDER BY name")]
-        prompt = build_prompt(people, db.labels(conn, "type"), db.labels(conn, "status"), lang)
+        prompt = build_prompt(people, db.labels(conn, "type"), db.labels(conn, "status"))
         mime = MIME.get(path.suffix.lower())
         data = path.read_bytes() if (not doc["text"] and provider.supports_files) else None
         r = provider.analyze(prompt, doc["text"], data, mime)
