@@ -370,6 +370,29 @@ def test_real_tesseract_reads_image(tmp_path):
         assert "Рахунок" in text
 
 
+def test_thumbnails(tmp_path):
+    from PIL import Image
+    client, _ = make(tmp_path, FakeProvider())
+    page = Image.new("RGB", (595, 842), "white")
+    page.save(tmp_path / "inbox" / "scan.pdf")
+    page.save(tmp_path / "inbox" / "photo.jpg")
+    (tmp_path / "inbox" / "note.txt").write_text("Рахунок\nдо сплати 250 грн", encoding="utf-8")
+    (tmp_path / "inbox" / "broken.pdf").write_bytes(b"%PDF-1.4 not really")
+    client.post("/api/scan")
+    docs = {d["filename"]: d for d in client.get("/api/documents").json()}
+    for name in ("scan.pdf", "photo.jpg", "note.txt"):
+        r = client.get(f"/api/documents/{docs[name]['id']}/thumb")
+        assert r.status_code == 200 and r.headers["content-type"] == "image/webp" and "max-age" in r.headers["cache-control"]
+        assert Image.open(__import__("io").BytesIO(r.content)).width <= 360
+    assert (tmp_path / "data" / "thumbs" / f"{docs['scan.pdf']['sha256']}.webp").exists()  # кэш по хешу содержимого
+    assert client.get(f"/api/documents/{docs['broken.pdf']['id']}/thumb").status_code == 415
+    # превью файла, положенного в архив вручную
+    (tmp_path / "archive").mkdir(exist_ok=True)
+    page.save(tmp_path / "archive" / "manual.png")
+    assert client.get("/api/fs/thumb", params={"path": "manual.png"}).status_code == 200
+    assert client.get("/api/fs/thumb", params={"path": "../inbox/photo.jpg"}).status_code == 400
+
+
 def test_translit():
     assert to_latin("Михайло Парм") == "Mykhailo Parm"
     assert to_latin("Юлія Їжак, Яготин") == "Yuliia Yizhak, Yahotyn"

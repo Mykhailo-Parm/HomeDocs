@@ -15,6 +15,7 @@ from . import auth, config, db, pipeline
 from .ai import make_provider
 from .extract import MIME, SUPPORTED
 from .ocr import make_ocr
+from .thumbs import thumbnail
 from .translit import safe_name, to_latin
 
 STATIC = Path(__file__).parent / "static"
@@ -52,7 +53,7 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
         resp.headers["X-Frame-Options"] = "SAMEORIGIN"
         resp.headers["Referrer-Policy"] = "no-referrer"
         if request.url.path.startswith("/api/"):
-            resp.headers["Cache-Control"] = "no-store"
+            resp.headers.setdefault("Cache-Control", "no-store")  # превью задают своё кэширование
         return resp
 
     # ---------- авторизация ----------
@@ -417,7 +418,7 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
     def doc_brief(r):
         d = row(r)
         return {k: d.get(k) for k in ("id", "title", "filename", "status", "doc_type", "doc_status", "person", "doc_date",
-                                      "amount", "currency", "due_date", "trashed_at", "sender")}
+                                      "amount", "currency", "due_date", "trashed_at", "sender", "sha256")}
 
     @api.get("/fs")
     def fs_list(path: str = ""):
@@ -454,8 +455,8 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
             out["specials"] = {"inbox": st["review"] + st["errors"], "trash": st["trash"]}
         return out
 
-    @api.get("/fs/file")
-    def fs_file(path: str, download: bool = False):
+    def fs_resolve(path: str) -> Path:
+        """Файл рабочего стола: «@inbox/…» во «Входящих» или путь внутри архива."""
         if path.startswith("@inbox/"):
             inbox = Path(cfg["inbox_dir"]).resolve()
             p = (inbox / path[len("@inbox/"):]).resolve()
@@ -465,6 +466,11 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
             p = archive_path(path)
         if not p.is_file():
             raise HTTPException(404)
+        return p
+
+    @api.get("/fs/file")
+    def fs_file(path: str, download: bool = False):
+        p = fs_resolve(path)
         return FileResponse(p, media_type=MIME.get(p.suffix.lower(), "application/octet-stream"), filename=p.name,
                             content_disposition_type="attachment" if download else "inline",
                             headers={"Content-Security-Policy": "frame-ancestors 'self'"})
@@ -564,20 +570,46 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
         roots = [Path(cfg[k]).resolve() for k in ("inbox_dir", "archive_dir", "trash_dir")]
         return path if path.is_file() and any(path.is_relative_to(r) for r in roots) else None
 
-    @api.get("/documents/{doc_id}/file")
-    def file(doc_id: int, download: bool = False):
-        r = conn.execute("SELECT orig_path, archive_path, trash_info FROM documents WHERE id=?", (doc_id,)).fetchone()
+    def doc_file(doc_id: int):
+        """Файл документа (архив, «Входящие» или корзина) и его хеш."""
+        r = conn.execute("SELECT sha256, orig_path, archive_path, trash_info FROM documents WHERE id=?", (doc_id,)).fetchone()
         if not r:
             raise HTTPException(404)
         in_trash = [now for _, now in json.loads(r["trash_info"] or "{}").values()]
         for p in (r["archive_path"], r["orig_path"], *in_trash):
             path = allowed_file(p)
             if path:
-                return FileResponse(path, media_type=MIME.get(path.suffix.lower(), "application/octet-stream"),
-                                    filename=path.name, content_disposition_type="attachment" if download else "inline",
-                                    # строгая CSP мешает встроенному просмотрщику PDF; nosniff и белый список типов остаются
-                                    headers={"Content-Security-Policy": "frame-ancestors 'self'"})
+                return path, r["sha256"]
         raise HTTPException(410, "File not found")
+
+    @api.get("/documents/{doc_id}/file")
+    def file(doc_id: int, download: bool = False):
+        path, _ = doc_file(doc_id)
+        return FileResponse(path, media_type=MIME.get(path.suffix.lower(), "application/octet-stream"),
+                            filename=path.name, content_disposition_type="attachment" if download else "inline",
+                            # строгая CSP мешает встроенному просмотрщику PDF; nosniff и белый список типов остаются
+                            headers={"Content-Security-Policy": "frame-ancestors 'self'"})
+
+    THUMBS = Path(cfg["data_dir"]) / "thumbs"
+
+    def thumb_response(path: Path, digest: str | None = None):
+        try:
+            out = thumbnail(path, THUMBS, digest)
+        except Exception:  # повреждённый или зашифрованный файл — интерфейс покажет значок
+            raise HTTPException(415, "No preview")
+        return FileResponse(out, media_type="image/webp", headers={"Cache-Control": "private, max-age=604800"})
+
+    @api.get("/documents/{doc_id}/thumb")
+    def doc_thumb(doc_id: int):
+        path, digest = doc_file(doc_id)
+        return thumb_response(path, digest)
+
+    @api.get("/fs/thumb")
+    def fs_thumb(path: str):
+        p = fs_resolve(path)
+        if p.suffix.lower() not in SUPPORTED:
+            raise HTTPException(415, "No preview")
+        return thumb_response(p)
 
     @api.post("/scan")
     def scan(provider=Depends(get_provider)):

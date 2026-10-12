@@ -109,17 +109,22 @@ class TesseractOCR:
                 return self._image(img).strip()[:max_chars]
         if ext == ".pdf":
             import pypdfium2 as pdfium
-            pdf = pdfium.PdfDocument(str(path))
+            from .thumbs import PDFIUM_LOCK
             parts = []
-            try:
-                for i in range(min(len(pdf), self.max_pages)):
-                    page = pdf[i]
-                    parts.append(self._image(page.render(scale=self.dpi / 72).to_pil()))
-                    page.close()
-                    if sum(map(len, parts)) > max_chars:
-                        break
-            finally:
-                pdf.close()
+            for i in range(self.max_pages):
+                with PDFIUM_LOCK:  # рендерим по странице под блокировкой, распознаём уже без неё
+                    pdf = pdfium.PdfDocument(str(path))
+                    try:
+                        if i >= len(pdf):
+                            break
+                        page = pdf[i]
+                        img = page.render(scale=self.dpi / 72).to_pil()
+                        page.close()
+                    finally:
+                        pdf.close()
+                parts.append(self._image(img))
+                if sum(map(len, parts)) > max_chars:
+                    break
             return "\n\n".join(p.strip() for p in parts).strip()[:max_chars]
         return ""
 

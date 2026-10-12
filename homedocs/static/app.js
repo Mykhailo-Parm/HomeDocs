@@ -15,7 +15,7 @@ let lang = LANGS.includes(ls.get('hd_lang')) ? ls.get('hd_lang') : 'en';
 const S = {
   user: null, meta: null, people: [], docs: [], stats: null, cur: null, sel: null,
   checked: new Set(), sort: 'added_at', order: 'desc', preview: false, authSetup: false, tab: 'types',
-  view: ls.get('hd_view') === 'list' ? 'list' : 'desktop', cwd: ls.get('hd_cwd') || '', desk: null, deskSel: new Set(),
+  view: ls.get('hd_view') === 'list' ? 'list' : 'desktop', listMode: ls.get('hd_list_mode') === 'table' ? 'table' : 'cards', cwd: ls.get('hd_cwd') || '', desk: null, deskSel: new Set(),
   f: { q: '', person: '', doc_type: '', doc_status: '', status: '', due: '', date_from: '', date_to: '' },
 };
 
@@ -286,17 +286,57 @@ async function openFolder(path) {
   await loadDesk();
 }
 async function loadDesk() {
+  const want = S.cwd;
+  let data;
   try {
-    S.desk = await api('/api/fs?' + new URLSearchParams({ path: S.cwd }));
+    data = await api('/api/fs?' + new URLSearchParams({ path: want }));
   } catch (e) {
-    if (!S.cwd) throw e;
+    if (!want || want !== S.cwd) throw e;
     S.cwd = ''; ls.set('hd_cwd', '');  // папку удалили или переименовали — назад на главную
-    S.desk = await api('/api/fs');
+    return loadDesk();
   }
+  if (want !== S.cwd) return;  // пока шёл запрос, открыли другую папку — этот ответ устарел
+  S.desk = data;
   renderDesk();
 }
 
 const IMG = ['png', 'jpg', 'jpeg', 'webp'];
+const PREVIEWABLE = ['pdf', 'txt', ...IMG];
+
+// Карточка документа: превью первой страницы, под ним главное
+function cardHtml(d, o = {}) {
+  const name = d ? (d.title || d.filename) : o.name;
+  const ext = ((d ? d.filename : o.name) || '').split('.').pop().toLowerCase();
+  const src = d ? `/api/documents/${d.id}/thumb?v=${esc((d.sha256 || '').slice(0, 10))}`
+    : PREVIEWABLE.includes(ext) && o.path ? `/api/fs/thumb?${new URLSearchParams({ path: o.path })}` : '';
+  const icon = ext === 'pdf' ? '📄' : IMG.includes(ext) ? '🖼' : '📝';
+  const thumb = src ? `<img class="thumb-img" loading="lazy" src="${src}" alt="" data-icon="${icon}">` : `<span class="thumb-icon">${icon}</span>`;
+  const meta = [];
+  if (d) {
+    if (d.person) meta.push(`<div class="card-meta">👤 ${esc(d.person)}</div>`);
+    const line = [d.doc_type ? `<span class="pill">${esc(lname('type', d.doc_type))}</span>` : '', d.doc_date ? fmtDate(d.doc_date) : ''].filter(Boolean).join(' ');
+    if (line) meta.push(`<div class="card-meta">${line}</div>`);
+    if (d.sender) meta.push(`<div class="card-meta muted">${esc(d.sender)}</div>`);
+  }
+  const foot = d && (d.amount != null || d.due_date || d.doc_status)
+    ? `<div class="card-foot">${d.amount != null ? `<b>${fmtAmount(d)}</b>` : ''} ${dueHtml(d)}
+        ${d.doc_status ? `<span class="pill ds-${esc(d.doc_status)}">${esc(lname('status', d.doc_status))}</span>` : ''}</div>` : '';
+  const state = d && (d.status === 'analyzed' || d.status === 'error')
+    ? `<span class="card-state st-${esc(d.status)}">${esc(t('st_' + d.status))}</span>` : '';
+  return `<div class="tile card ${o.sel ? 'sel' : ''}" ${o.key ? `data-key="${esc(o.key)}"` : ''} ${d ? `data-doc="${d.id}" data-id="${d.id}"` : ''}
+      ${o.path ? `data-path="${esc(o.path)}"` : ''} ${o.draggable ? 'draggable="true"' : ''} title="${esc(d ? d.filename : o.name)}">
+    <div class="thumb">${thumb}${state}
+      ${o.check ? `<input type="checkbox" class="card-ck" data-check="${d.id}" ${S.checked.has(d.id) ? 'checked' : ''}>` : ''}</div>
+    <div class="card-body"><div class="card-title">${esc(name)}</div>${meta.join('')}${foot}
+      ${o.rename ? `<div class="tile-act"><button data-tact="rename" title="${esc(t('rename'))}">✎</button></div>` : ''}</div>
+  </div>`;
+}
+// превью не получилось (повреждённый файл) — показываем значок
+document.addEventListener('error', e => {
+  const img = e.target;
+  if (img.classList && img.classList.contains('thumb-img')) img.outerHTML = `<span class="thumb-icon">${esc(img.dataset.icon || '📄')}</span>`;
+}, true);
+
 function fileUrl(f) {
   return f.doc ? `/api/documents/${f.doc.id}/file` : `/api/fs/file?${new URLSearchParams({ path: f.path })}`;
 }
@@ -322,20 +362,14 @@ function renderDesk() {
   S.desk.folders.forEach(f => tiles.push(`<div class="tile" data-open="${esc(f.path)}" data-drop="${esc(f.path)}" data-path="${esc(f.path)}" draggable="true">
       <div class="ic">📁</div><div class="nm">${esc(f.name)}</div><div class="sub">${f.count}</div>
       <div class="tile-act"><button data-tact="rename" title="${esc(t('rename'))}">✎</button>${f.count ? '' : `<button data-tact="rmdir" title="${esc(t('delete'))}">✕</button>`}</div></div>`));
-  S.desk.files.forEach(f => {
-    const d = f.doc, ext = (f.name.split('.').pop() || '').toLowerCase();
-    const icon = IMG.includes(ext) ? `<img loading="lazy" src="${fileUrl(f)}" alt="">` : (ext === 'pdf' ? '📄' : '📝');
-    const sub = d ? [d.doc_type ? esc(lname('type', d.doc_type)) : '', d.doc_date ? fmtDate(d.doc_date) : ''].filter(Boolean).join(' · ') : '';
-    const sel = S.deskSel.has(tileKey(f)) || (d && d.id === S.sel);
-    tiles.push(`<div class="tile ${sel ? 'sel' : ''}" data-key="${esc(tileKey(f))}" ${d ? `data-doc="${d.id}"` : ''} ${f.path ? `data-path="${esc(f.path)}"` : ''} ${special && cwd === '@trash' ? '' : 'draggable="true"'} title="${esc(f.name)}">
-      ${d && (d.status === 'analyzed' || d.status === 'error') ? `<span class="dot ${d.status}"></span>` : ''}
-      <div class="ic">${icon}</div><div class="nm">${esc(d ? d.title || d.filename : f.name)}</div><div class="sub">${sub}</div>
-      ${!d && f.path && !special ? `<div class="tile-act"><button data-tact="rename" title="${esc(t('rename'))}">✎</button></div>` : ''}</div>`);
-  });
   if (sp) tiles.push(`<div class="tile" data-open="@trash" data-drop-special="@trash"><div class="ic">🗑</div><div class="nm">${esc(t('trash'))}</div>${sp.trash ? `<div class="sub">${sp.trash}</div>` : ''}</div>`);
+  const cards = S.desk.files.map(f => cardHtml(f.doc, {
+    name: f.name, path: f.path, key: tileKey(f), draggable: cwd !== '@trash', rename: !f.doc && f.path && !special,
+    sel: S.deskSel.has(tileKey(f)) || (f.doc && f.doc.id === S.sel),
+  }));
   const empty = cwd === '@inbox' ? 'empty_inbox' : cwd === '@trash' ? 'empty_trash_view' : 'empty_folder';
-  const hasContent = S.desk.folders.length || S.desk.files.length;
-  $('#desk').innerHTML = tiles.join('') + (hasContent ? '' : `<div class="empty">${esc(t(empty))}</div>`);
+  $('#desk').innerHTML = (tiles.length ? `<div class="desk-folders">${tiles.join('')}</div>` : '')
+    + (cards.length ? `<div class="cards">${cards.join('')}</div>` : `<div class="empty">${esc(t(empty))}</div>`);
 }
 
 $('#desk').addEventListener('click', async e => {
@@ -534,6 +568,14 @@ function renderTable() {
     <td class="nowrap st-${esc(d.status)}">${esc(t('st_' + d.status))}</td></tr>`).join('')
     || `<tr><td colspan="11" class="empty">${esc(t(filtered ? 'empty_filtered' : 'empty'))}</td></tr>`;
   $('#docCount').textContent = t('docs_count', { n: S.docs.length });
+  const cards = S.listMode === 'cards';
+  $('.table-wrap', $('#listView')).hidden = cards;
+  $('#cardList').hidden = !cards;
+  $('#listModeBtn').textContent = t(cards ? 'mode_table' : 'mode_cards');
+  if (cards) {
+    $('#cardList').innerHTML = S.docs.map(d => cardHtml(d, { check: true, sel: d.id === S.sel })).join('')
+      || `<div class="empty">${esc(t(filtered ? 'empty_filtered' : 'empty'))}</div>`;
+  }
   renderBulk();
 }
 function renderBulk() {
@@ -570,6 +612,22 @@ $('#rows').addEventListener('click', e => {
   const tr = e.target.closest('tr.row');
   if (tr) show(+tr.dataset.id);
 });
+$('#listModeBtn').addEventListener('click', () => {
+  S.listMode = S.listMode === 'cards' ? 'table' : 'cards';
+  ls.set('hd_list_mode', S.listMode);
+  renderTable();
+});
+$('#cardList').addEventListener('click', e => {
+  const cb = e.target.closest('[data-check]');
+  if (cb) {
+    e.stopPropagation();
+    cb.checked ? S.checked.add(+cb.dataset.check) : S.checked.delete(+cb.dataset.check);
+    renderBulk();
+    return;
+  }
+  const card = e.target.closest('.card[data-id]');
+  if (card) show(+card.dataset.id);
+});
 $('#checkAll').addEventListener('change', () => {
   S.docs.forEach(d => $('#checkAll').checked ? S.checked.add(d.id) : S.checked.delete(d.id));
   renderTable();
@@ -602,12 +660,13 @@ async function show(id) {
   } catch (e) { fail(e); return; }
   renderDetail();
   $$('#rows tr.row').forEach(tr => tr.classList.toggle('sel', +tr.dataset.id === id));
+  $$('#cardList .card').forEach(c => c.classList.toggle('sel', +c.dataset.id === id));
   $$('#desk .tile[data-doc]').forEach(el => el.classList.toggle('sel', +el.dataset.doc === id || S.deskSel.has(el.dataset.key)));
 }
 function closeDetail() {
   S.cur = null; S.sel = null;
   renderDetail();
-  $$('#rows tr.sel').forEach(tr => tr.classList.remove('sel'));
+  $$('#rows tr.sel, #cardList .card.sel').forEach(el => el.classList.remove('sel'));
   $$('#desk .tile.sel').forEach(el => { if (!S.deskSel.has(el.dataset.key)) el.classList.remove('sel'); });
 }
 
@@ -856,7 +915,10 @@ document.addEventListener('keydown', e => {
     e.preventDefault();
     const i = S.docs.findIndex(d => d.id === S.sel);
     const j = i < 0 ? 0 : Math.min(S.docs.length - 1, Math.max(0, i + (e.key === 'ArrowDown' ? 1 : -1)));
-    show(S.docs[j].id).then(() => { const tr = $(`#rows tr[data-id="${S.docs[j].id}"]`); if (tr) tr.scrollIntoView({ block: 'nearest' }); });
+    show(S.docs[j].id).then(() => {
+      const el = $(S.listMode === 'cards' ? `#cardList [data-id="${S.docs[j].id}"]` : `#rows tr[data-id="${S.docs[j].id}"]`);
+      if (el) el.scrollIntoView({ block: 'nearest' });
+    });
   }
 });
 
