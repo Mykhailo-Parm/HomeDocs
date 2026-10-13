@@ -16,7 +16,7 @@ const S = {
   user: null, meta: null, people: [], docs: [], stats: null, cur: null, sel: null,
   checked: new Set(), sort: 'added_at', order: 'desc', preview: false, authSetup: false, tab: 'types',
   view: ls.get('hd_view') === 'list' ? 'list' : 'desktop', listMode: ls.get('hd_list_mode') === 'table' ? 'table' : 'cards', cwd: ls.get('hd_cwd') || '', desk: null, deskSel: new Set(),
-  f: { q: '', person: '', doc_type: '', doc_status: '', status: '', due: '', date_from: '', date_to: '' },
+  f: { q: '', person: '', doc_type: '', doc_status: '', status: '', due: '', date_from: '', date_to: '', visibility: '' },
 };
 
 // ---------- общие помощники ----------
@@ -329,7 +329,7 @@ function cardHtml(d, o = {}) {
       ${o.path ? `data-path="${esc(o.path)}"` : ''} ${o.draggable ? 'draggable="true"' : ''} title="${esc(d ? d.filename : o.name)}">
     <div class="thumb">${thumb}${state}
       ${o.check ? `<input type="checkbox" class="card-ck" data-check="${d.id}" ${S.checked.has(d.id) ? 'checked' : ''}>` : ''}</div>
-    <div class="card-body"><div class="card-title">${esc(name)}</div>${meta.join('')}${foot}
+    <div class="card-body"><div class="card-title">${d && d.private ? `<span title="${esc(t('private_label'))}">🔒</span> ` : ''}${esc(name)}</div>${meta.join('')}${foot}
       ${o.rename ? `<div class="tile-act"><button data-tact="rename" title="${esc(t('rename'))}">✎</button></div>` : ''}</div>
   </div>`;
 }
@@ -480,10 +480,12 @@ function renderFilters() {
   $('#fDocStatus').innerHTML = options([...labelsOf('status').map(l => [l.key, lname('status', l.key)]), ['none', t('no_doc_status')]],
     S.f.doc_status, `<option value="">${esc(t('any_doc_status'))}</option>`);
   $('#fStatus').innerHTML = options(['analyzed', 'approved', 'error'].map(s => [s, t('st_' + s)]), S.f.status, `<option value="">${esc(t('any_state'))}</option>`);
+  $('#fVis').innerHTML = options([['private', '🔒 ' + t('vis_private')], ['shared', t('vis_shared')]], S.f.visibility,
+    `<option value="">${esc(t('vis_all'))}</option>`);
   $('#fFrom').value = S.f.date_from || '';
   $('#fTo').value = S.f.date_to || '';
 }
-const filterSel = { '#fPerson': 'person', '#fType': 'doc_type', '#fDocStatus': 'doc_status', '#fStatus': 'status' };
+const filterSel = { '#fPerson': 'person', '#fType': 'doc_type', '#fDocStatus': 'doc_status', '#fStatus': 'status', '#fVis': 'visibility' };
 Object.entries(filterSel).forEach(([sel, key]) => $(sel).addEventListener('change', () => {
   S.f[key] = $(sel).value; S.f.due = ''; saveFilters(); renderStats(); loadDocs().catch(fail);
 }));
@@ -497,7 +499,7 @@ $('#q').addEventListener('input', () => {
   }, 250);
 });
 function resetFilters() {
-  S.f = { q: '', person: '', doc_type: '', doc_status: '', status: '', due: '', date_from: '', date_to: '' };
+  S.f = { q: '', person: '', doc_type: '', doc_status: '', status: '', due: '', date_from: '', date_to: '', visibility: '' };
   $('#q').value = ''; saveFilters(); renderFilters(); renderStats(); loadDocs().catch(fail);
 }
 [['#fFrom', 'date_from'], ['#fTo', 'date_to']].forEach(([sel, key]) => $(sel).addEventListener('change', () => {
@@ -558,7 +560,7 @@ function renderTable() {
   const filtered = Object.values(S.f).some(Boolean);
   $('#rows').innerHTML = S.docs.map(d => `<tr class="row ${d.id === S.sel ? 'sel' : ''}" data-id="${d.id}">
     <td class="ck"><input type="checkbox" data-check="${d.id}" ${S.checked.has(d.id) ? 'checked' : ''}></td>
-    <td><div class="t">${esc(d.title || d.filename)}</div><div class="muted small">${esc(d.sender || '')}</div></td>
+    <td><div class="t">${d.private ? `<span title="${esc(t('private_label'))}">🔒</span> ` : ''}${esc(d.title || d.filename)}</div><div class="muted small">${esc(d.sender || '')}</div></td>
     <td>${esc(d.person || '—')}</td>
     <td>${d.doc_type ? `<span class="pill">${esc(lname('type', d.doc_type))}</span>` : ''}</td>
     <td class="nowrap">${fmtDate(d.doc_date)}</td>
@@ -636,6 +638,14 @@ $('#checkAll').addEventListener('change', () => {
 });
 $('#bulkClear').addEventListener('click', () => { S.checked.clear(); renderTable(); });
 $('#bulkTrash').addEventListener('click', () => trashDocs([...S.checked]).catch(fail));
+[['#bulkPrivate', true], ['#bulkShared', false]].forEach(([sel, value]) => $(sel).addEventListener('click', async () => {
+  try {
+    const r = await api('/api/documents/privacy', send('POST', { ids: [...S.checked], private: value }));
+    toast(t(value ? 'made_private_n' : 'made_shared_n', { n: r.done }) + (r.done < S.checked.size ? ' · ' + t('not_owner_skipped') : ''), 'ok');
+    await refresh();
+    if (S.cur) await show(S.cur.id);
+  } catch (e) { fail(e); }
+}));
 $('#bulkApprove').addEventListener('click', async () => {
   $('#bulkApprove').disabled = true;
   try {
@@ -678,10 +688,14 @@ function labelOptions(kind, cur, allowNone) {
     + `<option value="__new">${esc(t(kind === 'type' ? 'new_type_opt' : 'new_status_opt'))}</option>`;
 }
 
+const MOBILE = window.matchMedia('(max-width: 1000px), (pointer: coarse)');
+
 function previewHtml(d) {
   const url = `/api/documents/${d.id}/file`;
   const ext = (d.filename.split('.').pop() || '').toLowerCase();
   if (['png', 'jpg', 'jpeg', 'webp'].includes(ext)) return `<img class="preview" src="${url}" alt="">`;
+  // на телефоне PDF во встроенном окне не показывается и мешает прокрутке — показываем первую страницу картинкой
+  if (MOBILE.matches) return `<a href="${url}" target="_blank" rel="noopener"><img class="preview" src="/api/documents/${d.id}/thumb" alt=""></a>`;
   return `<iframe class="preview" src="${url}" title="${esc(d.filename)}"></iframe>`;
 }
 
@@ -689,12 +703,18 @@ function renderDetail() {
   const d = S.cur;
   $('#detail').hidden = !d;
   $('#main').classList.toggle('with-detail', !!d);
+  document.body.classList.toggle('detail-open', !!d);  // на телефоне страница под карточкой не прокручивается
   if (!d) return;
   const v = x => esc(x ?? '');
   $('#detail').innerHTML = `
     <div class="d-head">
-      <div><b>${esc(d.filename)}</b> <span class="small st-${esc(d.status)}">· ${esc(t('st_' + d.status))}</span></div>
+      <div><b>${d.private ? '🔒 ' : ''}${esc(d.filename)}</b> <span class="small st-${esc(d.status)}">· ${esc(t('st_' + d.status))}</span></div>
       <button class="icon" data-act="close" title="${esc(t('close'))}" aria-label="${esc(t('close'))}">✕</button>
+    </div>
+    <div class="priv-row">
+      <label class="priv-toggle ${d.private ? 'on' : ''}"><input type="checkbox" data-priv ${d.private ? 'checked' : ''} ${d.can_set_private && !d.trashed_at ? '' : 'disabled'}>
+        🔒 ${esc(t('private_label'))}</label>
+      <span class="muted small">${esc(d.private ? t('private_hint_on') : t('private_hint_off'))}${d.owner ? ' · ' + esc(t('owner_label', { name: d.owner })) : ''}</span>
     </div>
     ${d.summary ? `<p class="muted" style="margin:6px 0">${esc(d.summary)}</p>` : ''}
     ${d.error ? `<div class="alert bad">${esc(d.error)}</div>` : ''}
@@ -813,6 +833,16 @@ $('#detail').addEventListener('click', async e => {
 $('#detail').addEventListener('toggle', e => { if (e.target.matches('details.doc-text')) S.textOpen = e.target.open; }, true);
 
 $('#detail').addEventListener('change', async e => {
+  const priv = e.target.closest('[data-priv]');
+  if (priv && S.cur) {
+    try {
+      S.cur = await api('/api/documents/' + S.cur.id, send('PATCH', { private: priv.checked }));
+      toast(t(S.cur.private ? 'made_private' : 'made_shared'), 'ok');
+      renderDetail();
+      refresh();
+    } catch (err) { fail(err); priv.checked = !priv.checked; }
+    return;
+  }
   const sel = e.target.closest('select[data-kind]');
   if (!sel || sel.value !== '__new') return;
   const kind = sel.dataset.kind;

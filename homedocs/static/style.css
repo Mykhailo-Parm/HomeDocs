@@ -193,9 +193,27 @@ button.danger-solid { background: var(--bad); color: #fff; border-color: var(--b
 .toast.bad { border-left-color: var(--bad) } .toast.ok { border-left-color: var(--ok) }
 footer { padding: 0 16px 16px; font-size: 12px }
 
+.priv-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin: 8px 0 2px }
+.priv-toggle { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; font-size: 13.5px; padding: 4px 10px;
+  border: 1px solid var(--line); border-radius: 20px; cursor: pointer; user-select: none }
+.priv-toggle input { width: 16px; height: 16px; accent-color: var(--accent); margin: 0 }
+.priv-toggle.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--card)) }
+
 @media (max-width: 1000px) {
   main.with-detail { grid-template-columns: minmax(0, 1fr) }
-  aside { position: fixed; inset: 0; top: 0; max-height: none; border-radius: 0; z-index: 20 }
+  /* карточка документа на телефоне — полный экран со своей прокруткой */
+  aside { position: fixed; inset: 0; top: 0; height: 100vh; height: 100dvh; max-height: none; border-radius: 0; z-index: 20;
+    overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding-top: 0; box-shadow: none }
+  aside .d-head { position: sticky; top: 0; z-index: 3; background: var(--card); padding: 12px 0 8px; margin: 0 -2px;
+    border-bottom: 1px solid var(--line) }
+  aside .d-head .icon { font-size: 20px; padding: 8px 14px }
+  aside .actions { position: sticky; bottom: 0; z-index: 3; background: var(--card); margin: 14px -14px 0; padding: 10px 14px;
+    padding-bottom: max(10px, env(safe-area-inset-bottom)); border-top: 1px solid var(--line) }
+  aside .actions { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none }  /* одна строка, листается вбок */
+  aside .actions button { flex: 0 0 auto; min-height: 42px }
+  aside .preview { height: auto; max-height: 60vh }
+  aside input, aside select, aside textarea { font-size: 16px }  /* иначе iPhone приближает страницу при вводе */
+  body.detail-open { overflow: hidden }
 }
 @media (max-width: 560px) {
   header { padding: 8px 12px } main { padding: 10px 12px } .stats { padding: 10px 12px 0 }

@@ -1,6 +1,7 @@
 """SQLite: документы, люди, типы/статусы, пользователи и сессии."""
 import json
 import sqlite3
+import threading
 from pathlib import Path
 
 from .translit import slug
@@ -80,11 +81,42 @@ OLD_TYPES = {"счёт": "invoice", "счет": "invoice", "информация
              "письмо": "letter", "другое": "other"}
 
 
-def connect(data_dir: str) -> sqlite3.Connection:
+class Database:
+    """Своё соединение SQLite на каждый поток.
+
+    FastAPI обрабатывает запросы параллельно в нескольких потоках; одно общее соединение при этом
+    ломается («bad parameter or other API misuse») — например, пока идёт долгий скан, а интерфейс
+    обновляет список. Режим WAL позволяет читать, пока другой поток пишет.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._local = threading.local()
+
+    def _conn(self) -> sqlite3.Connection:
+        c = getattr(self._local, "conn", None)
+        if c is None:
+            c = sqlite3.connect(self.path, timeout=30, check_same_thread=False)
+            c.row_factory = sqlite3.Row
+            c.execute("PRAGMA foreign_keys = ON")
+            c.execute("PRAGMA busy_timeout = 30000")
+            self._local.conn = c
+        return c
+
+    def execute(self, sql: str, params=()):
+        return self._conn().execute(sql, params)
+
+    def executescript(self, sql: str):
+        return self._conn().executescript(sql)
+
+    def commit(self):
+        self._conn().commit()
+
+
+def connect(data_dir: str) -> Database:
     Path(data_dir).mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(Path(data_dir) / "homedocs.db", check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
+    conn = Database(Path(data_dir) / "homedocs.db")
+    conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(SCHEMA)
     migrate(conn)
     return conn
@@ -98,6 +130,9 @@ def migrate(conn):
         conn.execute("ALTER TABLE documents ADD COLUMN text_source TEXT")
         conn.execute("UPDATE documents SET text_source = CASE WHEN text <> '' THEN "
                      "CASE WHEN lower(filename) LIKE '%.txt' THEN 'txt' ELSE 'pdf' END END")
+    if "private" not in cols:  # приватный документ видит только владелец (кто загрузил/отсканировал)
+        conn.execute("ALTER TABLE documents ADD COLUMN private INTEGER NOT NULL DEFAULT 0")
+        conn.execute("ALTER TABLE documents ADD COLUMN owner_id INTEGER REFERENCES users(id)")
     if "trashed_at" not in cols:  # корзина: когда удалён и куда перенесены файлы
         conn.execute("ALTER TABLE documents ADD COLUMN trashed_at TEXT")
         conn.execute("ALTER TABLE documents ADD COLUMN trash_info TEXT")

@@ -64,6 +64,7 @@
         <select id="fType"></select>
         <select id="fDocStatus"></select>
         <select id="fStatus"></select>
+        <select id="fVis"></select>
         <label class="date-range"><span data-i18n="date_from"></span><input type="date" id="fFrom"></label>
         <label class="date-range"><span data-i18n="date_to"></span><input type="date" id="fTo"></label>
         <button id="resetFilters" data-i18n="reset_filters"></button>
@@ -75,6 +76,8 @@
       <div class="bulk" id="bulk" hidden>
         <span id="bulkCount"></span>
         <button class="primary" id="bulkApprove" data-i18n="approve_selected"></button>
+        <button id="bulkPrivate" data-i18n="make_private"></button>
+        <button id="bulkShared" data-i18n="make_shared"></button>
         <button class="danger" id="bulkTrash" data-i18n="trash_selected"></button>
         <button id="bulkClear" data-i18n="clear"></button>
       </div>

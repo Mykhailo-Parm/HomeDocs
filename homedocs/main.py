@@ -214,7 +214,27 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
         d["tags"] = json.loads(d["tags"] or "[]")
         return d
 
-    SELECT = "SELECT d.*, p.name AS person FROM documents d LEFT JOIN people p ON p.id=d.person_id"
+    SELECT = ("SELECT d.*, p.name AS person, ow.username AS owner FROM documents d "
+              "LEFT JOIN people p ON p.id=d.person_id LEFT JOIN users ow ON ow.id=d.owner_id")
+    VISIBLE = "(d.private = 0 OR d.owner_id = ?)"  # приватный документ видит только его владелец
+
+    def can_see(doc_id: int, u) -> bool:
+        r = conn.execute("SELECT private, owner_id FROM documents WHERE id=?", (doc_id,)).fetchone()
+        return bool(r) and (not r["private"] or r["owner_id"] == u["id"])
+
+    def check_doc(doc_id: int, u):
+        if not can_see(doc_id, u):  # чужой приватный — как будто его нет
+            raise HTTPException(404)
+
+    def hidden_paths(u) -> set:
+        """Файлы чужих приватных документов: на рабочем столе их не видно и открыть нельзя."""
+        out = set()
+        for r in conn.execute("SELECT orig_path, archive_path, trash_info FROM documents WHERE private=1 AND owner_id IS NOT ?",
+                              (u["id"],)):
+            for p in (r["orig_path"], r["archive_path"], *[now for _, now in json.loads(r["trash_info"] or "{}").values()]):
+                if p:
+                    out.add(Path(p).resolve())
+        return out
 
     @api.get("/meta")
     def meta():
@@ -247,7 +267,8 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
         return {"done": done, "recognized": recognized, **ocr_status()}
 
     @api.post("/documents/{doc_id}/ocr")
-    def ocr_one(doc_id: int):
+    def ocr_one(doc_id: int, u=Depends(current_user)):
+        check_doc(doc_id, u)
         if not ocr.status()["available"]:
             raise HTTPException(400, "OCR is not installed (Tesseract not found)")
         try:
@@ -256,7 +277,7 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
             raise HTTPException(404)
         except FileNotFoundError as e:
             raise HTTPException(410, str(e))
-        return document(doc_id)
+        return doc_json(doc_id, u)
 
     SORTS = {"added_at": "d.added_at", "doc_date": "d.doc_date", "amount": "d.amount", "title": "COALESCE(d.title, d.filename)",
              "due_date": "d.due_date", "doc_type": "d.doc_type", "doc_status": "d.doc_status", "person": "p.name",
@@ -272,10 +293,14 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
                 pass
         return d
 
-    def query_docs(q="", person="", doc_type="", status="", doc_status="", due="", sort="added_at", order="desc",
-                   date_from="", date_to=""):
+    def query_docs(u, q="", person="", doc_type="", status="", doc_status="", due="", sort="added_at", order="desc",
+                   date_from="", date_to="", visibility=""):
         col = SORTS.get(sort, "d.added_at")
-        where, args = ["d.trashed_at IS NULL"], []
+        where, args = ["d.trashed_at IS NULL", VISIBLE], [u["id"]]
+        if visibility == "private":
+            where.append("d.private = 1")
+        elif visibility == "shared":
+            where.append("d.private = 0")
         if date_from:
             where.append("d.doc_date >= ?"); args.append(date_from)
         if date_to:
@@ -303,29 +328,56 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
 
     @api.get("/documents")
     def documents(q: str = "", person: str = "", doc_type: str = "", status: str = "", doc_status: str = "",
-                  due: str = "", sort: str = "added_at", order: str = "desc", date_from: str = "", date_to: str = ""):
-        return query_docs(q, person, doc_type, status, doc_status, due, sort, order, date_from, date_to)
+                  due: str = "", sort: str = "added_at", order: str = "desc", date_from: str = "", date_to: str = "",
+                  visibility: str = "", u=Depends(current_user)):
+        return query_docs(u, q, person, doc_type, status, doc_status, due, sort, order, date_from, date_to, visibility)
 
     @api.get("/stats")
-    def stats():
-        live = "FROM documents WHERE trashed_at IS NULL"
-        one = lambda sql, *a: conn.execute(sql, a).fetchone()[0]
+    def stats(u=Depends(current_user)):
+        mine = "(private = 0 OR owner_id = ?)"
+        live = f"FROM documents WHERE trashed_at IS NULL AND {mine}"
+        one = lambda sql, *a: conn.execute(sql, (u["id"], *a)).fetchone()[0]
         today = date.today().isoformat()
         return {"total": one(f"SELECT COUNT(*) {live}"),
                 "review": one(f"SELECT COUNT(*) {live} AND status='analyzed'"),
                 "errors": one(f"SELECT COUNT(*) {live} AND status='error'"),
                 "to_pay": one(f"SELECT COUNT(*) {live} AND doc_status='to_pay'"),
                 "to_pay_sum": {c or "": round(s, 2) for c, s in conn.execute(
-                    f"SELECT currency, SUM(amount) {live} AND doc_status='to_pay' AND amount IS NOT NULL GROUP BY currency")},
+                    f"SELECT currency, SUM(amount) {live} AND doc_status='to_pay' AND amount IS NOT NULL GROUP BY currency",
+                    (u["id"],))},
                 "overdue": one(f"SELECT COUNT(*) {live} AND due_date < ? AND doc_status IN ('to_pay','action')", today),
-                "trash": one("SELECT COUNT(*) FROM documents WHERE trashed_at IS NOT NULL")}
+                "private": one(f"SELECT COUNT(*) {live} AND private = 1"),
+                "trash": one(f"SELECT COUNT(*) FROM documents WHERE trashed_at IS NOT NULL AND {mine}")}
+
+    def doc_json(doc_id: int, u):
+        check_doc(doc_id, u)
+        r = conn.execute(SELECT + " WHERE d.id=?", (doc_id,)).fetchone()
+        d = {**with_folder(row(r)), "text": r["text"]}  # текст (в т.ч. распознанный) нужен только в карточке
+        # пометку «приватный» может менять владелец; у документа без владельца — любой (он и станет владельцем)
+        d["can_set_private"] = r["owner_id"] in (None, u["id"])
+        return d
 
     @api.get("/documents/{doc_id}")
-    def document(doc_id: int):
-        r = conn.execute(SELECT + " WHERE d.id=?", (doc_id,)).fetchone()
-        if not r:
-            raise HTTPException(404)
-        return {**with_folder(row(r)), "text": r["text"]}  # текст (в т.ч. распознанный) нужен только в карточке
+    def document(doc_id: int, u=Depends(current_user)):
+        return doc_json(doc_id, u)
+
+    class Privacy(BaseModel):
+        ids: list[int]
+        private: bool
+
+    def set_private(doc_id: int, private: bool, u) -> bool:
+        r = conn.execute("SELECT owner_id FROM documents WHERE id=?", (doc_id,)).fetchone()
+        if not r or r["owner_id"] not in (None, u["id"]):
+            return False
+        conn.execute("UPDATE documents SET private=?, owner_id=? WHERE id=?", (int(private), u["id"], doc_id))
+        return True
+
+    @api.post("/documents/privacy")
+    def privacy(body: Privacy, u=Depends(current_user)):
+        """Сделать документы приватными или общими. Можно только со своими (или ничьими) документами."""
+        n = sum(set_private(i, body.private, u) for i in body.ids if can_see(i, u))
+        conn.commit()
+        return {"done": n}
 
     class Patch(BaseModel):
         title: str | None = None
@@ -340,12 +392,14 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
         suggested_name: str | None = None
         person: str | None = None
         tags: list[str] | None = None
+        private: bool | None = None
 
     @api.patch("/documents/{doc_id}")
-    def patch(doc_id: int, body: Patch):
-        if not conn.execute("SELECT 1 FROM documents WHERE id=?", (doc_id,)).fetchone():
-            raise HTTPException(404)
+    def patch(doc_id: int, body: Patch, u=Depends(current_user)):
+        check_doc(doc_id, u)
         data = body.model_dump(exclude_unset=True)
+        if data.get("private") is not None and not set_private(doc_id, data["private"], u):
+            raise HTTPException(403, "Only the owner can change privacy")
         if data.get("doc_type") and data["doc_type"] not in db.label_keys(conn, "type"):
             raise HTTPException(400, "Unknown type")
         if data.get("doc_status") and data["doc_status"] not in db.label_keys(conn, "status"):
@@ -358,7 +412,7 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
             p, _ = db.get_or_create_person(conn, data["person"] or "")
             conn.execute("UPDATE documents SET person_id=? WHERE id=?", (p["id"] if p else None, doc_id))
         conn.commit()
-        return document(doc_id)
+        return doc_json(doc_id, u)
 
     def do_approve(doc_id: int, folder: Path | None = None):
         try:
@@ -369,18 +423,19 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
             raise HTTPException(410, str(e))
 
     @api.post("/documents/{doc_id}/approve")
-    def approve(doc_id: int):
+    def approve(doc_id: int, u=Depends(current_user)):
+        check_doc(doc_id, u)
         return {"archive_path": do_approve(doc_id)}
 
     class Ids(BaseModel):
         ids: list[int]
 
     @api.post("/documents/approve")
-    def approve_many(body: Ids):
+    def approve_many(body: Ids, u=Depends(current_user)):
         done, failed = [], []
         for i in body.ids:
             r = conn.execute("SELECT status FROM documents WHERE id=?", (i,)).fetchone()
-            if not r or r["status"] != "analyzed":
+            if not r or r["status"] != "analyzed" or not can_see(i, u):
                 continue
             try:
                 done.append(do_approve(i))
@@ -390,9 +445,11 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
 
     # ---------- корзина ----------
 
-    def each(ids, fn):
+    def each(ids, fn, u):
         n = 0
         for i in ids:
+            if not can_see(i, u):
+                continue
             try:
                 fn(conn, cfg, i); n += 1
             except KeyError:
@@ -400,21 +457,22 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
         return {"done": n}
 
     @api.post("/documents/trash")
-    def to_trash(body: Ids):
-        return each(body.ids, pipeline.trash)
+    def to_trash(body: Ids, u=Depends(current_user)):
+        return each(body.ids, pipeline.trash, u)
 
     @api.post("/documents/restore")
-    def restore(body: Ids):
-        return each(body.ids, pipeline.restore)
+    def restore(body: Ids, u=Depends(current_user)):
+        return each(body.ids, pipeline.restore, u)
 
     @api.post("/documents/purge")
-    def purge(body: Ids):
+    def purge(body: Ids, u=Depends(current_user)):
         """Окончательно удалить с диска (только из корзины)."""
-        return each(body.ids, pipeline.purge)
+        return each(body.ids, pipeline.purge, u)
 
     @api.post("/trash/empty")
-    def empty_trash():
-        return each([r[0] for r in conn.execute("SELECT id FROM documents WHERE trashed_at IS NOT NULL")], pipeline.purge)
+    def empty_trash(u=Depends(current_user)):
+        """Очищает корзину от того, что видит этот пользователь (чужие приватные остаются)."""
+        return each([r[0] for r in conn.execute("SELECT id FROM documents WHERE trashed_at IS NOT NULL")], pipeline.purge, u)
 
     # ---------- папки на диске («рабочий стол») ----------
 
@@ -437,13 +495,14 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
     def doc_brief(r):
         d = row(r)
         return {k: d.get(k) for k in ("id", "title", "filename", "status", "doc_type", "doc_status", "person", "doc_date",
-                                      "amount", "currency", "due_date", "trashed_at", "sender", "sha256")}
+                                      "amount", "currency", "due_date", "trashed_at", "sender", "sha256", "private", "owner")}
 
     @api.get("/fs")
-    def fs_list(path: str = ""):
+    def fs_list(path: str = "", u=Depends(current_user)):
         if path == "@inbox":
             # необработанные документы и ещё не отсканированные файлы во «Входящих»
-            docs = conn.execute(SELECT + " WHERE d.trashed_at IS NULL AND d.status<>'approved' ORDER BY d.added_at DESC").fetchall()
+            docs = conn.execute(SELECT + f" WHERE d.trashed_at IS NULL AND d.status<>'approved' AND {VISIBLE} ORDER BY d.added_at DESC",
+                                (u["id"],)).fetchall()
             known = {Path(r[0]).resolve() for r in conn.execute("SELECT orig_path FROM documents")}
             inbox = Path(cfg["inbox_dir"])
             loose = [p for p in sorted(inbox.rglob("*")) if p.is_file() and p.suffix.lower() in SUPPORTED
@@ -452,29 +511,32 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
             files += [{"name": p.name, "path": "@inbox/" + p.relative_to(inbox).as_posix(), "doc": None} for p in loose]
             return {"path": path, "folders": [], "files": files}
         if path == "@trash":
-            docs = conn.execute(SELECT + " WHERE d.trashed_at IS NOT NULL ORDER BY d.trashed_at DESC").fetchall()
+            docs = conn.execute(SELECT + f" WHERE d.trashed_at IS NOT NULL AND {VISIBLE} ORDER BY d.trashed_at DESC",
+                                (u["id"],)).fetchall()
             return {"path": path, "folders": [], "files": [{"name": r["filename"], "doc": doc_brief(r)} for r in docs]}
         base = archive_path(path)
         if not base.is_dir():
             raise HTTPException(404, "Folder not found")
         docs = {Path(r["archive_path"]).resolve(): r for r in conn.execute(
-            SELECT + " WHERE d.archive_path IS NOT NULL AND d.trashed_at IS NULL")}
+            SELECT + f" WHERE d.archive_path IS NOT NULL AND d.trashed_at IS NULL AND {VISIBLE}", (u["id"],))}
+        hidden = hidden_paths(u)
         folders, files = [], []
         for e in sorted(base.iterdir(), key=lambda e: e.name.casefold()):
             if e.name.startswith("."):
                 continue
             if e.is_dir():
-                folders.append({"name": e.name, "path": rel_of(e), "count": sum(1 for f in e.rglob("*") if f.is_file())})
-            elif e.is_file():
+                count = sum(1 for f in e.rglob("*") if f.is_file() and f.resolve() not in hidden)
+                folders.append({"name": e.name, "path": rel_of(e), "count": count})
+            elif e.is_file() and e.resolve() not in hidden:
                 d = docs.get(e.resolve())
                 files.append({"name": e.name, "path": rel_of(e), "doc": doc_brief(d) if d else None})
         out = {"path": rel_of(base) if base != archive_root() else "", "folders": folders, "files": files}
         if not out["path"]:
-            st = stats()
+            st = stats(u)
             out["specials"] = {"inbox": st["review"] + st["errors"], "trash": st["trash"]}
         return out
 
-    def fs_resolve(path: str) -> Path:
+    def fs_resolve(path: str, u) -> Path:
         """Файл рабочего стола: «@inbox/…» во «Входящих» или путь внутри архива."""
         if path.startswith("@inbox/"):
             inbox = Path(cfg["inbox_dir"]).resolve()
@@ -483,13 +545,13 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
                 raise HTTPException(400, "Path outside inbox")
         else:
             p = archive_path(path)
-        if not p.is_file():
+        if not p.is_file() or p in hidden_paths(u):
             raise HTTPException(404)
         return p
 
     @api.get("/fs/file")
-    def fs_file(path: str, download: bool = False):
-        p = fs_resolve(path)
+    def fs_file(path: str, download: bool = False, u=Depends(current_user)):
+        p = fs_resolve(path, u)
         return FileResponse(p, media_type=MIME.get(p.suffix.lower(), "application/octet-stream"), filename=p.name,
                             content_disposition_type="attachment" if download else "inline",
                             headers={"Content-Security-Policy": "frame-ancestors 'self'"})
@@ -542,15 +604,16 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
         doc_ids: list[int] = []
 
     @api.post("/fs/move")
-    def fs_move(body: MoveBody):
+    def fs_move(body: MoveBody, u=Depends(current_user)):
         """Перенос файлов/папок архива в папку. Документы из «Входящих» при этом раскладываются в неё."""
         target = archive_path(body.to)
         if not target.is_dir():
             raise HTTPException(404, "Folder not found")
         moved = 0
+        hidden = hidden_paths(u)
         for rel in body.paths:
             src = archive_path(rel)
-            if not src.exists() or src == archive_root() or src.parent == target:
+            if not src.exists() or src == archive_root() or src.parent == target or src in hidden:
                 continue
             if src.is_dir() and (target == src or target.is_relative_to(src)):
                 raise HTTPException(400, "Cannot move a folder into itself")
@@ -560,7 +623,7 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
             moved += 1
         for i in body.doc_ids:
             r = conn.execute("SELECT status, archive_path FROM documents WHERE id=? AND trashed_at IS NULL", (i,)).fetchone()
-            if not r:
+            if not r or not can_see(i, u):
                 continue
             if r["status"] == "approved" and r["archive_path"] and Path(r["archive_path"]).is_file():
                 src = Path(r["archive_path"])
@@ -574,12 +637,13 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
         return {"moved": moved}
 
     @api.post("/documents/{doc_id}/reanalyze")
-    def reanalyze(doc_id: int, provider=Depends(get_provider)):
-        stats = pipeline.new_stats()
-        err = pipeline.analyze_document(conn, cfg, provider, doc_id, stats)
+    def reanalyze(doc_id: int, provider=Depends(get_provider), u=Depends(current_user)):
+        check_doc(doc_id, u)
+        result = pipeline.new_stats()
+        err = pipeline.analyze_document(conn, cfg, provider, doc_id, result)
         if err:
             raise HTTPException(502, err)
-        return {**document(doc_id), "new_types": stats["new_types"], "new_statuses": stats["new_statuses"]}
+        return {**doc_json(doc_id, u), "new_types": result["new_types"], "new_statuses": result["new_statuses"]}
 
     def allowed_file(p: str | None) -> Path | None:
         """Отдаём только файлы из «Входящих» и Архива."""
@@ -589,8 +653,9 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
         roots = [Path(cfg[k]).resolve() for k in ("inbox_dir", "archive_dir", "trash_dir")]
         return path if path.is_file() and any(path.is_relative_to(r) for r in roots) else None
 
-    def doc_file(doc_id: int):
+    def doc_file(doc_id: int, u):
         """Файл документа (архив, «Входящие» или корзина) и его хеш."""
+        check_doc(doc_id, u)
         r = conn.execute("SELECT sha256, orig_path, archive_path, trash_info FROM documents WHERE id=?", (doc_id,)).fetchone()
         if not r:
             raise HTTPException(404)
@@ -602,8 +667,8 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
         raise HTTPException(410, "File not found")
 
     @api.get("/documents/{doc_id}/file")
-    def file(doc_id: int, download: bool = False):
-        path, _ = doc_file(doc_id)
+    def file(doc_id: int, download: bool = False, u=Depends(current_user)):
+        path, _ = doc_file(doc_id, u)
         return FileResponse(path, media_type=MIME.get(path.suffix.lower(), "application/octet-stream"),
                             filename=path.name, content_disposition_type="attachment" if download else "inline",
                             # строгая CSP мешает встроенному просмотрщику PDF; nosniff и белый список типов остаются
@@ -619,20 +684,20 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
         return FileResponse(out, media_type="image/webp", headers={"Cache-Control": "private, max-age=604800"})
 
     @api.get("/documents/{doc_id}/thumb")
-    def doc_thumb(doc_id: int):
-        path, digest = doc_file(doc_id)
+    def doc_thumb(doc_id: int, u=Depends(current_user)):
+        path, digest = doc_file(doc_id, u)
         return thumb_response(path, digest)
 
     @api.get("/fs/thumb")
-    def fs_thumb(path: str):
-        p = fs_resolve(path)
+    def fs_thumb(path: str, u=Depends(current_user)):
+        p = fs_resolve(path, u)
         if p.suffix.lower() not in SUPPORTED:
             raise HTTPException(415, "No preview")
         return thumb_response(p)
 
     @api.post("/scan")
-    def scan(provider=Depends(get_provider)):
-        return pipeline.scan_inbox(conn, cfg, provider, ocr)
+    def scan(provider=Depends(get_provider), u=Depends(current_user)):
+        return pipeline.scan_inbox(conn, cfg, provider, ocr, u["id"])  # новые документы принадлежат тому, кто сканирует
 
     @api.post("/upload")
     def upload(file: UploadFile):
@@ -715,9 +780,10 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
         pages: list[str]
         name: str = ""
         analyze: bool = True
+        private: bool = False
 
     @api.post("/scanner/finish")
-    def scanner_finish(body: FinishBody):
+    def scanner_finish(body: FinishBody, u=Depends(current_user)):
         """Страницы → один PDF во «Входящих», затем обычный разбор ИИ."""
         if not body.pages:
             raise HTTPException(400, "No pages")
@@ -733,22 +799,25 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
         out = {"saved": dest.name, "doc": None, "error": None}
         if body.analyze:
             try:
-                out["stats"] = pipeline.scan_inbox(conn, cfg, get_provider(), ocr)
+                out["stats"] = pipeline.scan_inbox(conn, cfg, get_provider(), ocr, u["id"])
             except HTTPException as e:  # ИИ не настроен — файл всё равно во «Входящих»
                 out["error"] = e.detail
             r = conn.execute("SELECT id FROM documents WHERE orig_path=?", (str(dest),)).fetchone()
-            out["doc"] = document(r["id"]) if r else None
+            if r and body.private:
+                set_private(r["id"], True, u); conn.commit()
+            out["doc"] = doc_json(r["id"], u) if r else None
         return out
 
     @api.get("/export.csv")
     def export(q: str = "", person: str = "", doc_type: str = "", status: str = "", doc_status: str = "", due: str = "",
-               sort: str = "added_at", order: str = "desc", date_from: str = "", date_to: str = ""):
+               sort: str = "added_at", order: str = "desc", date_from: str = "", date_to: str = "", visibility: str = "",
+               u=Depends(current_user)):
         cols = ["id", "title", "person", "doc_type", "doc_status", "sender", "doc_date", "amount", "currency",
-                "due_date", "tags", "summary", "filename", "archive_path", "status", "added_at"]
+                "due_date", "tags", "summary", "filename", "archive_path", "status", "private", "owner", "added_at"]
         buf = io.StringIO()
         w = csv.writer(buf, delimiter=";")
         w.writerow(cols)
-        for d in query_docs(q, person, doc_type, status, doc_status, due, sort, order, date_from, date_to):
+        for d in query_docs(u, q, person, doc_type, status, doc_status, due, sort, order, date_from, date_to, visibility):
             w.writerow([", ".join(d["tags"]) if c == "tags" else d.get(c) for c in cols])
         return Response("﻿" + buf.getvalue(), media_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition": 'attachment; filename="homedocs.csv"'})
@@ -805,10 +874,16 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
     # ---------- люди ----------
 
     @api.get("/people")
-    def people():
-        return [{"id": p["id"], "name": p["name"], "aliases": json.loads(p["aliases"]),
-                 "documents": conn.execute("SELECT COUNT(*) FROM documents WHERE person_id=? AND trashed_at IS NULL", (p["id"],)).fetchone()[0]}
-                for p in conn.execute("SELECT * FROM people ORDER BY name")]
+    def people(u=Depends(current_user)):
+        out = []
+        for p in conn.execute("SELECT * FROM people ORDER BY name").fetchall():
+            seen, total = conn.execute(
+                "SELECT COALESCE(SUM(private = 0 OR owner_id = ?), 0), COUNT(*) FROM documents WHERE person_id=? AND trashed_at IS NULL",
+                (u["id"], p["id"])).fetchone()
+            if total and not seen:  # человек есть только в чужих приватных документах — не показываем даже имя
+                continue
+            out.append({"id": p["id"], "name": p["name"], "aliases": json.loads(p["aliases"]), "documents": seen})
+        return out
 
     class PersonPatch(BaseModel):
         name: str | None = None
@@ -816,7 +891,7 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
         merge_into: int | None = None
 
     @api.patch("/people/{pid}")
-    def patch_person(pid: int, body: PersonPatch):
+    def patch_person(pid: int, body: PersonPatch, u=Depends(current_user)):
         p = conn.execute("SELECT * FROM people WHERE id=?", (pid,)).fetchone()
         if not p:
             raise HTTPException(404)
@@ -838,7 +913,7 @@ def create_app(cfg: dict | None = None, provider=None, ocr=None) -> FastAPI:
                 conn.execute("UPDATE people SET aliases=? WHERE id=?",
                              (json.dumps([a.strip() for a in body.aliases if a.strip()], ensure_ascii=False), pid))
         conn.commit()
-        return people()
+        return people(u)
 
     app.include_router(api)
     app.mount("/", StaticFiles(directory=STATIC, html=True), name="static")
