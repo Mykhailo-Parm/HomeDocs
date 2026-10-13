@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#2f6fed">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="HD Scan">
+<title>HomeDocs Scan</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="scan.css">
+<script src="boot.js"></script>
+</head>
+<body class="scan">
+
+<header class="s-head">
+  <a href="/" class="s-back" data-i18n-title="s_archive">←</a>
+  <h1>📷 <span data-i18n="s_title"></span></h1>
+  <select class="langSel"><option value="en">EN</option><option value="uk">UK</option><option value="de">DE</option></select>
+</header>
+
+<main class="s-main">
+  <div id="pages" class="s-pages"></div>
+  <p id="hint" class="s-hint muted" data-i18n="s_hint"></p>
+  <div class="s-capture">
+    <label class="s-btn primary">📷 <span data-i18n="s_take"></span>
+      <input type="file" id="camera" accept="image/*" capture="environment" hidden></label>
+    <label class="s-btn">🖼 <span data-i18n="s_gallery"></span>
+      <input type="file" id="gallery" accept="image/*" multiple hidden></label>
+  </div>
+</main>
+
+<footer class="s-foot" id="foot" hidden>
+  <input id="docName" data-i18n-ph="s_name_ph" maxlength="80" autocomplete="off">
+  <button class="primary" id="saveBtn"></button>
+</footer>
+
+<!-- редактор страницы: углы, фильтр, поворот -->
+<div class="s-editor" id="editor" hidden>
+  <div class="s-ed-top">
+    <button id="edCancel" data-i18n="cancel"></button>
+    <span class="muted small" data-i18n="s_drag"></span>
+    <button class="primary" id="edDone" data-i18n="s_apply"></button>
+  </div>
+  <div class="s-stage" id="stage"><canvas id="canvas"></canvas></div>
+  <div class="s-ed-tools">
+    <div class="s-filters" id="filters"></div>
+    <div class="s-row">
+      <button id="edRotate">⟳ <span data-i18n="s_rotate"></span></button>
+      <button id="edFull">⛶ <span data-i18n="s_full"></span></button>
+      <button id="edAuto">✨ <span data-i18n="s_detect"></span></button>
+      <button class="danger" id="edDelete">🗑</button>
+    </div>
+  </div>
+</div>
+
+<div class="s-busy" id="busy" hidden><div class="s-spinner"></div><div id="busyText"></div></div>
+<div id="toasts" aria-live="polite"></div>
+
+<script src="i18n.js"></script>
+<script src="scan.js"></script>
+</body>
+</html>

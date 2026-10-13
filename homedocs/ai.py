@@ -6,29 +6,32 @@ import time
 
 import httpx
 
-PROMPT = """Ты помощник семейного архива документов. Документы могут быть на украинском, английском, немецком и других языках.
-Прочитай документ и верни ТОЛЬКО JSON-объект с полями:
-- "title": короткое понятное название документа (на языке документа, до 60 символов)
-- "doc_type": ровно одно значение из списка: {types}
-- "summary": 1-2 предложения о чём документ (по-русски)
-- "language": язык документа (код: uk, en, de, ...)
-- "sender": кто отправитель/организация (или null)
-- "recipient": на чьё имя адресован документ, полное имя как в документе (или null)
-- "doc_date": дата документа YYYY-MM-DD (или null)
-- "amount": сумма к оплате числом (или null)
-- "currency": валюта, например EUR (или null)
-- "due_date": срок оплаты YYYY-MM-DD (или null)
-- "tags": список из 0-4 коротких тегов
-- "confidence": число 0..1, насколько ты уверен в результате
+PROMPT = """You are the assistant of a family document archive. Documents may be in Ukrainian, English, German or other languages.
+Read the document and return ONLY a JSON object with these fields:
+- "title": short clear title of the document, in the document's own language (max 60 characters)
+- "doc_type": the key of the existing document type that clearly fits: {types}
+- "new_doc_type": null if an existing type clearly fits. If none does (never force a document into an unrelated type, e.g. a car registration is not "housing"), set "doc_type" to null and give a new general type (1-2 words, reusable for similar documents) as {{"en": "...", "uk": "...", "de": "..."}}
+- "doc_status": the key of the status that fits, or null if the document needs no action: {statuses}
+- "new_doc_status": null. ONLY if the document clearly needs a status none of the existing ones expresses, a new one as {{"en": "...", "uk": "...", "de": "..."}}
+- "summary": 1-2 sentences about what the document is, written in the document's own language
+- "language": language code of the document (uk, en, de, ...)
+- "sender": sender or organisation (or null)
+- "recipient": the person the document is addressed to, full name as written in the document (or null)
+- "doc_date": document date YYYY-MM-DD (or null)
+- "amount": amount to pay as a number (or null)
+- "currency": currency code, e.g. EUR (or null)
+- "due_date": payment or action deadline YYYY-MM-DD (or null)
+- "tags": list of 0-4 short tags in the document's language
+- "confidence": number 0..1, how sure you are about the result
 
-Уже известные члены семьи: {people}.
-Если получатель — это один из известных людей (даже если имя написано иначе: другой язык, транслитерация, порядок слов), верни в "recipient" имя известного человека ТОЧНО как в списке.
-Если получатель не похож ни на кого из списка, верни его имя как в документе — он будет добавлен как новый человек.
-Не выдумывай: если чего-то нет в документе, ставь null."""
+Known family members: {people}.
+If the recipient is one of the known people (even if the name is written differently: another language, transliteration, word order), return in "recipient" the known person's name EXACTLY as in the list.
+If the recipient matches nobody in the list, return their name as written in the document; they will be added as a new person.
+Prefer existing types and statuses; create new ones rarely. Do not invent anything: if something is not in the document, use null."""
 
-
-def build_prompt(people: list[str], doc_types: list[str]) -> str:
-    return PROMPT.format(types=", ".join(doc_types), people=", ".join(people) or "пока никого")
+def build_prompt(people: list[str], types: list[dict], statuses: list[dict]) -> str:
+    fmt = lambda ls: ", ".join(f'{l["key"]} ({l["names"].get("en", l["key"])})' for l in ls)
+    return PROMPT.format(types=fmt(types), statuses=fmt(statuses), people=", ".join(people) or "nobody yet")
 
 
 def parse_json(raw: str) -> dict:
@@ -39,10 +42,10 @@ def parse_json(raw: str) -> dict:
     except json.JSONDecodeError:
         m = re.search(r"\{.*\}", raw, re.S)
         if not m:
-            raise ValueError("ИИ вернул ответ не в формате JSON")
+            raise ValueError("AI response is not JSON")
         data = json.loads(m.group(0))
     if not isinstance(data, dict):
-        raise ValueError("ИИ вернул не объект JSON")
+        raise ValueError("AI response is not a JSON object")
     return data
 
 
@@ -60,7 +63,7 @@ class Gemini(Provider):
 
     def __init__(self, cfg):
         if not cfg["api_key"]:
-            raise RuntimeError("Не задан ключ Gemini (api_key в config.toml или GEMINI_API_KEY)")
+            raise RuntimeError("Gemini key is not set (api_key in config.toml or GEMINI_API_KEY)")
         self.key, self.model = cfg["api_key"], cfg["model"]
         self.models = [self.model] + [m for m in cfg.get("fallback_models", []) if m != self.model]
 
@@ -87,7 +90,7 @@ class Gemini(Provider):
                     continue
             break
         if r.status_code in (429, 500, 503):
-            raise RuntimeError("Gemini сейчас перегружен (Google отвечает %d). Попробуй ещё раз через пару минут" % r.status_code)
+            raise RuntimeError("Gemini is overloaded right now (Google returned %d). Try again in a few minutes" % r.status_code)
         r.raise_for_status()
         return parse_json(r.json()["candidates"][0]["content"]["parts"][0]["text"])
 
@@ -98,7 +101,7 @@ class Claude(Provider):
 
     def __init__(self, cfg):
         if not cfg["api_key"]:
-            raise RuntimeError("Не задан ключ Claude (api_key в config.toml или ANTHROPIC_API_KEY)")
+            raise RuntimeError("Claude key is not set (api_key in config.toml or ANTHROPIC_API_KEY)")
         self.key, self.model = cfg["api_key"], cfg["model"]
 
     def analyze(self, prompt, text, file_bytes, mime):
@@ -128,7 +131,7 @@ class Ollama(Provider):
 
     def analyze(self, prompt, text, file_bytes, mime):
         if not text:
-            raise RuntimeError("В документе нет текста (скан). Локальной модели нужен OCR — пока используй gemini/claude для сканов")
+            raise RuntimeError("The document has no text (scan). Install Tesseract OCR (see README) or use gemini/claude for scans")
         r = httpx.post(f"{self.host}/api/chat", json={
             "model": self.model, "stream": False, "format": "json", "options": {"temperature": 0},
             "messages": [{"role": "system", "content": prompt},
@@ -142,5 +145,5 @@ def make_provider(cfg: dict) -> Provider:
     name = ai["provider"]
     classes = {"gemini": Gemini, "claude": Claude, "ollama": Ollama}
     if name not in classes:
-        raise RuntimeError(f"Неизвестный ИИ-провайдер: {name}")
+        raise RuntimeError(f"Unknown AI provider: {name}")
     return classes[name](ai[name])

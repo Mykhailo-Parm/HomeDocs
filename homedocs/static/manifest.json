@@ -1,0 +1,16 @@
+{
+  "name": "HomeDocs Scan",
+  "short_name": "HD Scan",
+  "description": "Scan documents with the phone camera into the HomeDocs family archive",
+  "start_url": "/scan.html",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#121418",
+  "theme_color": "#2f6fed",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

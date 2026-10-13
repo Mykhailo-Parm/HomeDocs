@@ -1,139 +1,134 @@
 <!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
 <title>HomeDocs</title>
-<style>
-  :root { --bg:#f6f7f9; --fg:#1d2127; --muted:#6b7480; --card:#fff; --line:#e2e5ea; --accent:#2f6fed; --ok:#1a8f4c; --warn:#c77700; --bad:#c62f2f; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#14171b; --fg:#e8eaed; --muted:#98a1ad; --card:#1d2127; --line:#2c323a; --accent:#6c9bff; } }
-  * { box-sizing:border-box } body { margin:0; font:15px system-ui,sans-serif; background:var(--bg); color:var(--fg) }
-  header { display:flex; gap:12px; align-items:center; padding:12px 16px; background:var(--card); border-bottom:1px solid var(--line); flex-wrap:wrap }
-  header h1 { font-size:18px; margin:0 8px 0 0 }
-  input,select,button,textarea { font:inherit; color:inherit; background:var(--card); border:1px solid var(--line); border-radius:6px; padding:6px 10px }
-  button { cursor:pointer } button.primary { background:var(--accent); color:#fff; border-color:var(--accent) }
-  button:disabled { opacity:.5; cursor:default }
-  main { display:grid; grid-template-columns:1fr 380px; gap:16px; padding:16px } @media (max-width:900px){ main{grid-template-columns:1fr} }
-  .filters { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px }
-  table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:8px; overflow:hidden }
-  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top }
-  th { font-size:12px; text-transform:uppercase; color:var(--muted); cursor:pointer; user-select:none; white-space:nowrap }
-  tr.row { cursor:pointer } tr.row:hover, tr.sel { background:color-mix(in srgb, var(--accent) 8%, transparent) }
-  .pill { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; border:1px solid var(--line); margin:0 4px 2px 0 }
-  .st-analyzed { color:var(--warn) } .st-approved { color:var(--ok) } .st-error { color:var(--bad) }
-  .muted { color:var(--muted) } aside { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:14px; align-self:start; position:sticky; top:12px }
-  aside label { display:block; font-size:12px; color:var(--muted); margin-top:10px } aside input,aside select,aside textarea { width:100%; margin-top:2px }
-  .actions { display:flex; gap:8px; margin-top:14px; flex-wrap:wrap } .msg { margin:8px 16px; color:var(--muted) }
-</style>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E📂%3C/text%3E%3C/svg%3E">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<meta name="theme-color" content="#2f6fed">
+<link rel="stylesheet" href="style.css">
+<script src="boot.js"></script>
 </head>
 <body>
-<header>
-  <h1>📂 HomeDocs</h1>
-  <input id="q" placeholder="Поиск по содержимому…" size="28">
-  <button class="primary" id="scan">Сканировать «Входящие»</button>
-  <span class="muted" id="provider"></span>
-</header>
-<div class="msg" id="msg"></div>
-<main>
-  <section>
-    <div class="filters">
-      <select id="fPerson"><option value="">Все люди</option></select>
-      <select id="fType"><option value="">Все типы</option></select>
-      <select id="fStatus">
-        <option value="">Любой статус</option><option value="analyzed">Ждут подтверждения</option>
-        <option value="approved">В архиве</option><option value="error">Ошибки</option>
-      </select>
+
+<div id="auth" class="auth" hidden>
+  <form id="authForm" class="auth-card" autocomplete="on">
+    <h1>📂 HomeDocs</h1>
+    <div id="authHint" class="muted"></div>
+    <label><span data-i18n="username"></span><input id="aUser" name="username" autocomplete="username" required maxlength="40"></label>
+    <label><span data-i18n="password"></span><input id="aPass" name="password" type="password" autocomplete="current-password" required></label>
+    <label id="aPass2Wrap" hidden><span data-i18n="password_repeat"></span><input id="aPass2" type="password" autocomplete="new-password"></label>
+    <div id="authErr" class="err" role="alert"></div>
+    <button class="primary" id="authBtn" type="submit"></button>
+    <div class="auth-foot">
+      <select class="langSel" data-i18n-title="language"><option value="en">English</option><option value="uk">Українська</option><option value="de">Deutsch</option></select>
+      <button type="button" class="icon themeBtn"></button>
     </div>
-    <table>
-      <thead><tr>
-        <th data-s="title">Документ</th><th>Человек</th><th>Тип</th>
-        <th data-s="doc_date">Дата</th><th data-s="amount">Сумма</th><th>Статус</th>
-      </tr></thead>
-      <tbody id="rows"></tbody>
-    </table>
-  </section>
-  <aside id="detail"><span class="muted">Выбери документ в списке</span></aside>
-</main>
-<script>
-const $ = s => document.querySelector(s);
-const STATUS = {new:'новый', analyzed:'проверить', approved:'в архиве', error:'ошибка'};
-let sort = 'added_at', order = 'desc', sel = null, meta = null;
-const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-async function api(url, opts) {
-  const r = await fetch(url, opts && {headers:{'Content-Type':'application/json'}, ...opts});
-  if (!r.ok) throw new Error((await r.json().catch(()=>({}))).detail || r.statusText);
-  return r.json();
-}
-async function init() {
-  meta = await api('/api/meta');
-  $('#provider').textContent = 'ИИ: ' + meta.provider;
-  $('#fType').innerHTML += meta.doc_types.map(t => `<option>${esc(t)}</option>`).join('');
-  await loadPeople(); await load();
-}
-async function loadPeople() {
-  const ps = await api('/api/people'), cur = $('#fPerson').value;
-  $('#fPerson').innerHTML = '<option value="">Все люди</option>' + ps.map(p => `<option>${esc(p.name)}</option>`).join('');
-  $('#fPerson').value = cur;
-}
-async function load() {
-  const p = new URLSearchParams({q:$('#q').value, person:$('#fPerson').value, doc_type:$('#fType').value, status:$('#fStatus').value, sort, order});
-  const docs = await api('/api/documents?' + p);
-  $('#rows').innerHTML = docs.map(d => `<tr class="row ${d.id===sel?'sel':''}" data-id="${d.id}">
-    <td><b>${esc(d.title || d.filename)}</b><div class="muted">${esc(d.sender || '')}</div></td>
-    <td>${esc(d.person || '—')}</td><td>${d.doc_type ? `<span class="pill">${esc(d.doc_type)}</span>` : ''}</td>
-    <td>${esc(d.doc_date || '')}</td><td>${d.amount != null ? esc(d.amount + ' ' + (d.currency||'')) : ''}</td>
-    <td class="st-${d.status}">${STATUS[d.status]}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">Пока пусто. Положи файлы во «Входящие» и нажми «Сканировать».</td></tr>';
-}
-async function show(id) {
-  sel = id; const d = await api('/api/documents/' + id);
-  const opt = meta.doc_types.map(t => `<option ${t===d.doc_type?'selected':''}>${esc(t)}</option>`).join('');
-  $('#detail').innerHTML = `
-    <b>${esc(d.filename)}</b>
-    <div class="muted">${esc(d.summary || '')}</div>
-    ${d.error ? `<div class="st-error">${esc(d.error)}</div>` : ''}
-    ${d.confidence != null && d.confidence < 0.6 ? '<div class="st-analyzed">Низкая уверенность — проверь поля</div>' : ''}
-    <label>Название файла</label><input id="e_suggested_name" value="${esc(d.suggested_name)}">
-    <label>Тема</label><input id="e_title" value="${esc(d.title)}">
-    <label>Человек</label><input id="e_person" value="${esc(d.person)}">
-    <label>Тип</label><select id="e_doc_type">${opt}</select>
-    <label>Отправитель</label><input id="e_sender" value="${esc(d.sender)}">
-    <label>Дата</label><input id="e_doc_date" value="${esc(d.doc_date)}" placeholder="ГГГГ-ММ-ДД">
-    <label>Теги (через запятую)</label><input id="e_tags" value="${esc(d.tags.join(', '))}">
-    ${d.archive_path ? `<div class="muted" style="margin-top:8px">Архив: ${esc(d.archive_path)}</div>` : ''}
+  </form>
+</div>
+
+<div id="app" hidden>
+  <header>
+    <h1>📂 HomeDocs</h1>
+    <div class="search"><input id="q" type="search" data-i18n-ph="search_ph" autocomplete="off"></div>
+    <button class="primary" id="scan" data-i18n="scan"></button>
+    <button id="uploadBtn" data-i18n="upload"></button>
+    <a class="btn-link" href="/scan.html" data-i18n="scan_btn"></a>
+    <input type="file" id="fileInput" multiple hidden accept=".pdf,.png,.jpg,.jpeg,.webp,.txt">
+    <span class="spacer"></span>
+    <button id="viewBtn"></button>
+    <select class="langSel" data-i18n-title="language"><option value="en">EN</option><option value="uk">UK</option><option value="de">DE</option></select>
+    <button class="icon themeBtn"></button>
+    <button class="icon" id="settingsBtn" data-i18n-title="settings">⚙</button>
+    <span class="who hide-sm" id="who"></span>
+    <button class="icon" id="logoutBtn" data-i18n-title="logout">⎋</button>
+  </header>
+  <div class="stats" id="stats"></div>
+  <main id="main">
+    <section id="deskView" hidden>
+      <div class="desk-bar">
+        <nav class="crumbs" id="crumbs"></nav>
+        <span class="spacer"></span>
+        <button id="newFolderBtn" data-i18n="new_folder"></button>
+        <button id="emptyTrashBtn" class="danger" data-i18n="empty_trash" hidden></button>
+      </div>
+      <div class="desk" id="desk"></div>
+      <div class="muted small desk-hint" data-i18n="desk_hint"></div>
+    </section>
+    <section id="listView">
+      <div class="filters">
+        <select id="fPerson"></select>
+        <select id="fType"></select>
+        <select id="fDocStatus"></select>
+        <select id="fStatus"></select>
+        <label class="date-range"><span data-i18n="date_from"></span><input type="date" id="fFrom"></label>
+        <label class="date-range"><span data-i18n="date_to"></span><input type="date" id="fTo"></label>
+        <button id="resetFilters" data-i18n="reset_filters"></button>
+        <span class="spacer"></span>
+        <span class="muted small" id="docCount"></span>
+        <button id="listModeBtn"></button>
+        <button id="exportBtn" data-i18n="export"></button>
+      </div>
+      <div class="bulk" id="bulk" hidden>
+        <span id="bulkCount"></span>
+        <button class="primary" id="bulkApprove" data-i18n="approve_selected"></button>
+        <button class="danger" id="bulkTrash" data-i18n="trash_selected"></button>
+        <button id="bulkClear" data-i18n="clear"></button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th class="ck"><input type="checkbox" id="checkAll" data-i18n-title="select_all"></th>
+            <th data-s="title" data-i18n="col_doc"></th>
+            <th data-s="person" data-i18n="col_person"></th>
+            <th data-s="doc_type" data-i18n="col_type"></th>
+            <th data-s="doc_date" data-i18n="col_date"></th>
+            <th data-s="amount" data-i18n="col_amount"></th>
+            <th data-s="due_date" data-i18n="col_due"></th>
+            <th data-s="doc_status" data-i18n="col_status"></th>
+            <th data-s="folder" data-i18n="col_folder"></th>
+            <th data-s="added_at" data-i18n="col_added"></th>
+            <th data-s="status" data-i18n="col_state"></th>
+          </tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <div class="cards list-cards" id="cardList" hidden></div>
+    </section>
+    <aside id="detail" hidden></aside>
+  </main>
+  <footer class="muted"><span data-i18n="shortcuts"></span> · <span id="provider"></span></footer>
+  <datalist id="peopleList"></datalist>
+</div>
+
+<div class="drop" id="drop" hidden><div data-i18n="drop_here"></div></div>
+
+<dialog id="settings">
+  <div class="dlg-head">
+    <div class="tabs" id="tabs"></div>
+    <button class="icon" id="settingsClose" data-i18n-title="close">✕</button>
+  </div>
+  <div class="dlg-body" id="settingsBody"></div>
+</dialog>
+
+<dialog id="codeDlg">
+  <div class="code-form">
+    <p id="codeMsg"></p>
+    <label class="muted small" for="codeInput" data-i18n="type_code"></label>
+    <div class="code-row"><div class="code" id="codeVal"></div><input id="codeInput" inputmode="numeric" maxlength="3" autocomplete="off"></div>
     <div class="actions">
-      <button class="primary" onclick="save(${id}, true)" ${d.status==='approved'?'disabled':''}>Принять и разложить</button>
-      <button onclick="save(${id}, false)">Сохранить</button>
-      <button onclick="window.open('/api/documents/${id}/file')">Открыть файл</button>
-      <button onclick="reanalyze(${id})">Заново через ИИ</button>
-    </div>`;
-  load();
-}
-async function save(id, approve) {
-  const g = k => $('#e_' + k).value.trim();
-  try {
-    await api('/api/documents/' + id, {method:'PATCH', body:JSON.stringify({
-      suggested_name:g('suggested_name'), title:g('title'), person:g('person'), doc_type:g('doc_type'), sender:g('sender'),
-      doc_date:g('doc_date') || null, tags:g('tags').split(',').map(s=>s.trim()).filter(Boolean)})});
-    if (approve) { const r = await api(`/api/documents/${id}/approve`, {method:'POST'}); note('Скопировано в ' + r.archive_path); }
-    await loadPeople(); await show(id);
-  } catch (e) { note('Ошибка: ' + e.message); }
-}
-async function reanalyze(id) { try { note('Анализирую…'); await api(`/api/documents/${id}/reanalyze`, {method:'POST'}); note(''); show(id); } catch(e){ note('Ошибка: ' + e.message); } }
-function note(t) { $('#msg').textContent = t; }
-$('#scan').onclick = async () => {
-  $('#scan').disabled = true; note('Сканирую и анализирую, это может занять время…');
-  try {
-    const r = await api('/api/scan', {method:'POST'});
-    note(`Найдено ${r.found}, добавлено ${r.added}, дубликатов ${r.duplicates}, ошибок ${r.errors}` + (r.new_people.length ? `. Новые люди: ${r.new_people.join(', ')}` : ''));
-    await loadPeople(); await load();
-  } catch (e) { note('Ошибка: ' + e.message); }
-  $('#scan').disabled = false;
-};
-$('#rows').onclick = e => { const tr = e.target.closest('tr.row'); if (tr) show(+tr.dataset.id); };
-document.querySelectorAll('th[data-s]').forEach(th => th.onclick = () => { order = sort === th.dataset.s && order === 'desc' ? 'asc' : 'desc'; sort = th.dataset.s; load(); });
-['#fPerson','#fType','#fStatus'].forEach(s => $(s).onchange = load);
-let t; $('#q').oninput = () => { clearTimeout(t); t = setTimeout(load, 250); };
-init();
-</script>
+      <button type="button" id="codeCancel" data-i18n="cancel"></button>
+      <button type="button" id="codeOk" class="danger-solid" disabled data-i18n="delete_forever"></button>
+    </div>
+  </div>
+</dialog>
+
+<div id="toasts" aria-live="polite"></div>
+
+<script src="i18n.js"></script>
+<script src="app.js"></script>
 </body>
 </html>

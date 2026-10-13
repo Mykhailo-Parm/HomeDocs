@@ -7,8 +7,12 @@ DEFAULTS = {
     "inbox_dir": "inbox",
     "archive_dir": "archive",
     "data_dir": "data",
-    "doc_types": ["счёт", "информация", "договор", "налоги", "медицина", "страховка",
-                  "банк", "работа", "школа", "письмо", "другое"],
+    "trash_dir": "trash",
+    # с каких адресов можно открыть HomeDocs: этот компьютер, домашние сети, Tailscale (100.64.0.0/10)
+    "allow_from": ["127.0.0.0/8", "::1/128", "192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12", "100.64.0.0/10",
+                   "fd7a:115c:a1e0::/48"],
+    # распознавание сканов без текстового слоя (нужен установленный Tesseract)
+    "ocr": {"enabled": True, "languages": "ukr+deu+eng+rus", "tesseract_cmd": "", "dpi": 300, "max_pages": 15},
     "ai": {
         "provider": "gemini",
         "gemini": {"model": "gemini-3.5-flash", "api_key": "",

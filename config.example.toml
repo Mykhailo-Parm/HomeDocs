@@ -4,9 +4,18 @@
 inbox_dir   = "inbox"      # сюда кладёшь новые сканы
 archive_dir = "archive"    # сюда копируются подтверждённые документы
 data_dir    = "data"       # база данных SQLite
+trash_dir   = "trash"      # корзина: сюда переносятся удалённые документы до окончательного удаления
 
-# Типы документов (ИИ выбирает из этого списка, можно менять)
-doc_types = ["счёт", "информация", "договор", "налоги", "медицина", "страховка", "банк", "работа", "школа", "письмо", "другое"]
+# Типы документов и статусы настраиваются в интерфейсе (⚙ Настройки), ИИ может добавлять новые сам.
+
+[ocr]
+# Распознавание текста на сканах и фото (без интернета). Нужен Tesseract:
+#   Windows: winget install UB-Mannheim.TesseractOCR   Linux: apt install tesseract-ocr tesseract-ocr-ukr tesseract-ocr-deu
+enabled       = true
+languages     = "ukr+deu+eng+rus"   # языки Tesseract через «+»
+tesseract_cmd = ""                  # путь к tesseract.exe, если не нашёлся сам
+dpi           = 300                 # чёткость страниц PDF для распознавания
+max_pages     = 15                  # сколько страниц PDF распознавать
 
 [ai]
 # Провайдер: "gemini" (бесплатный ключ), "ollama" (локально), "claude"
