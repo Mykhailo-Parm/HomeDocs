@@ -109,14 +109,15 @@ $('#gallery').addEventListener('change', e => { addFiles(e.target.files); e.targ
 $('#saveBtn').addEventListener('click', async () => {
   busy(t('s_saving'));
   try {
-    const r = await api('/api/scanner/finish', { method: 'POST', body: JSON.stringify({ pages: pages.map(p => p.id), name: $('#docName').value.trim() }) });
+    const r = await api('/api/scanner/finish', { method: 'POST', body: JSON.stringify({ pages: pages.map(p => p.id), name: $('#docName').value.trim(), private: $('#privScan').checked }) });
     const d = r.doc;
-    lastSaved = `<b>✅ ${esc(t('s_saved', { name: r.saved }))}</b>`
+    lastSaved = `<b>✅ ${d && d.private ? '🔒 ' : ''}${esc(t('s_saved', { name: r.saved }))}</b>`
       + (d && d.status === 'analyzed' ? `<div>${esc(d.title || '')}</div><div class="muted small">${esc([d.person, d.sender, d.doc_date].filter(Boolean).join(' · '))}</div>` : '')
       + (r.error ? `<div class="muted small">${esc(r.error)}</div>` : '')
       + `<div style="margin-top:8px"><a href="/">${esc(t('s_open_archive'))}</a></div>`;
     pages = []; savePages();
     $('#docName').value = '';
+    $('#privScan').checked = false;
   } catch (e) { if (e.message !== 'login') toast(t('error', { msg: e.message }), 'bad'); }
   busy('');
   render();

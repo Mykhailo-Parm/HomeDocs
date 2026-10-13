@@ -201,6 +201,7 @@ def test_file_endpoint_only_serves_inbox_and_archive(tmp_path):
     secret = tmp_path / "secret.txt"
     secret.write_text("secret", encoding="utf-8")
     client.app.state.conn.execute("UPDATE documents SET orig_path=? WHERE id=?", (str(secret), doc["id"]))
+    client.app.state.conn.commit()
     assert client.get(f"/api/documents/{doc['id']}/file").status_code == 410
 
 
@@ -464,6 +465,94 @@ def test_only_home_networks_allowed(tmp_path):
         r = TestClient(app, headers=HDR, client=(outsider, 50000)).get("/api/auth/state")
         assert r.status_code == 403
     assert TestClient(app, headers=HDR, client=("100.101.102.103", 1)).get("/").status_code == 200  # Tailscale
+
+
+def test_private_documents_visible_only_to_owner(tmp_path):
+    prov = FakeProvider(recipient="Тайна Секретна")
+    owner, _ = make(tmp_path, prov)  # admin
+    conn = owner.app.state.conn
+    auth.create_user(conn, "mama", "mama-pass-1")
+    mama = TestClient(owner.app, headers=HDR)
+    mama.post("/api/auth/login", json={"username": "mama", "password": "mama-pass-1"})
+    (tmp_path / "inbox" / "secret.txt").write_text("medical secret", encoding="utf-8")
+    owner.post("/api/scan")
+    doc = owner.get("/api/documents").json()[0]
+    assert doc["owner"] == "admin" and doc["private"] == 0
+    assert mama.get("/api/documents").json()  # пока общий — мама видит
+    # мама не может сделать приватным чужой документ
+    assert mama.patch(f"/api/documents/{doc['id']}", json={"private": True}).status_code == 403
+    assert owner.patch(f"/api/documents/{doc['id']}", json={"private": True}).json()["private"] == 1
+    path = owner.post(f"/api/documents/{doc['id']}/approve").json()["archive_path"]
+    rel = Path(path).relative_to(tmp_path / "archive").as_posix()
+    # владелец видит всё
+    assert len(owner.get("/api/documents").json()) == 1
+    assert owner.get(f"/api/documents/{doc['id']}/file").status_code == 200
+    # для мамы документа нет нигде
+    assert mama.get("/api/documents").json() == []
+    assert mama.get("/api/documents", params={"q": "medical"}).json() == []
+    for url in (f"/api/documents/{doc['id']}", f"/api/documents/{doc['id']}/file", f"/api/documents/{doc['id']}/thumb"):
+        assert mama.get(url).status_code == 404
+    assert mama.get("/api/fs/file", params={"path": rel}).status_code == 404
+    folder = rel.split("/")[0]
+    assert mama.get("/api/fs", params={"path": rel.rsplit("/", 1)[0]}).json()["files"] == []
+    assert next(f for f in mama.get("/api/fs").json()["folders"] if f["name"] == folder)["count"] == 0
+    assert mama.get("/api/stats").json()["total"] == 0 and owner.get("/api/stats").json()["private"] == 1
+    assert all(p["name"] != "Тайна Секретна" for p in mama.get("/api/people").json())  # даже имя не видно
+    assert "secret" not in mama.get("/api/export.csv").text
+    # действия с чужим приватным не проходят
+    assert mama.post("/api/documents/trash", json={"ids": [doc["id"]]}).json()["done"] == 0
+    assert mama.patch(f"/api/documents/{doc['id']}", json={"title": "x"}).status_code == 404
+    mama.post("/api/trash/empty")
+    assert Path(path).exists()
+    # в корзине приватный тоже виден только владельцу
+    owner.post("/api/documents/trash", json={"ids": [doc["id"]]})
+    assert mama.get("/api/fs", params={"path": "@trash"}).json()["files"] == []
+    assert len(owner.get("/api/fs", params={"path": "@trash"}).json()["files"]) == 1
+    owner.post("/api/documents/restore", json={"ids": [doc["id"]]})
+    # снова общий — мама видит
+    assert owner.post("/api/documents/privacy", json={"ids": [doc["id"]], "private": False}).json()["done"] == 1
+    assert len(mama.get("/api/documents").json()) == 1
+    assert len(owner.get("/api/documents", params={"visibility": "private"}).json()) == 0
+
+
+def test_scanner_can_save_private(tmp_path):
+    client, _ = make(tmp_path, FakeProvider())
+    phone_photo(tmp_path / "p.jpg")
+    with open(tmp_path / "p.jpg", "rb") as f:
+        pid = client.post("/api/scanner/pages", files={"file": ("p.jpg", f, "image/jpeg")}).json()["id"]
+    out = client.post("/api/scanner/finish", json={"pages": [pid], "private": True}).json()
+    assert out["doc"]["private"] == 1 and out["doc"]["owner"] == "admin"
+
+
+def test_parallel_requests_during_long_scan(tmp_path):
+    """Долгий скан + интерфейс одновременно: раньше общее соединение SQLite давало 500 и ложное «сессия истекла»."""
+    import threading
+    import time
+
+    class Slow(FakeProvider):
+        def analyze(self, *a):
+            time.sleep(0.02)
+            return super().analyze(*a)
+    client, _ = make(tmp_path, Slow())
+    for i in range(25):
+        (tmp_path / "inbox" / f"d{i}.txt").write_text(f"doc {i}", encoding="utf-8")
+    cookies = dict(client.cookies)
+    bad = []
+
+    def ui():
+        c = TestClient(client.app, headers=HDR, cookies=cookies)
+        for _ in range(40):
+            for url in ("/api/auth/state", "/api/documents", "/api/stats", "/api/people", "/api/fs"):
+                r = c.get(url)
+                if r.status_code != 200 or (url == "/api/auth/state" and not r.json()["user"]):
+                    bad.append((url, r.status_code))
+    threads = [threading.Thread(target=ui) for _ in range(4)]
+    for t in threads:
+        t.start()
+    assert client.post("/api/scan").json()["added"] == 25
+    for t in threads:
+        t.join()
+    assert bad == []
 
 
 def test_translit():

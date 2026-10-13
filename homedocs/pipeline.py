@@ -65,7 +65,7 @@ def ocr_document(conn, ocr, doc_id: int) -> int:
     return len(text.strip())
 
 
-def scan_inbox(conn, cfg, provider, ocr=None) -> dict:
+def scan_inbox(conn, cfg, provider, ocr=None, owner_id: int | None = None) -> dict:
     """Находит новые файлы во «Входящих» и анализирует. Файлы не изменяет."""
     inbox = Path(cfg["inbox_dir"])
     inbox.mkdir(parents=True, exist_ok=True)
@@ -87,8 +87,8 @@ def scan_inbox(conn, cfg, provider, ocr=None) -> dict:
             stats["duplicates"] += 1
             continue
         text, source = read_text(path, ocr)
-        cur = conn.execute("INSERT INTO documents(sha256, orig_path, filename, text, text_source) VALUES (?,?,?,?,?)",
-                           (digest, str(path), path.name, text, source))
+        cur = conn.execute("INSERT INTO documents(sha256, orig_path, filename, text, text_source, owner_id) VALUES (?,?,?,?,?,?)",
+                           (digest, str(path), path.name, text, source, owner_id))
         conn.commit()
         err = analyze_document(conn, cfg, provider, cur.lastrowid, stats)
         stats["errors" if err else "added"] += 1
